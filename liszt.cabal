@@ -1,0 +1,44 @@
+name:                liszt
+version:             0
+synopsis:            Append-only database
+description:         Append-only database
+homepage:            https://github.com/fumieval/liszt
+license:             BSD3
+license-file:        LICENSE
+author:              Fumiaki Kinoshita
+maintainer:          fumiexcel@gmail.com
+copyright:           2017 Fumiaki Kinoshita
+category:            Database
+build-type:          Simple
+extra-source-files:  README.md
+cabal-version:       >=1.10
+
+library
+  hs-source-dirs:      src
+  exposed-modules:     Database.Liszt.Server, Database.Liszt.Types
+  build-depends:       base >= 4.7 && < 5
+    , bytestring
+    , directory
+    , vector
+    , stm
+    , binary
+    , websockets
+    , containers
+  ghc-options: -Wall
+  default-language:    Haskell2010
+
+executable liszt
+  hs-source-dirs: app
+  main-is: Client.hs
+  ghc-options: -O2 -threaded -Wall
+  build-depends: base, websockets, binary, bytestring, liszt, time
+
+executable lisztd
+  hs-source-dirs: app
+  main-is: Server.hs
+  ghc-options: -O2 -threaded -Wall
+  build-depends: base, websockets, binary, bytestring, liszt
+
+source-repository head
+  type:     git
+  location: https://github.com/fumieval/liszt
