@@ -30,14 +30,14 @@ executable liszt
   hs-source-dirs: app
   main-is: Client.hs
   ghc-options: -O2 -threaded -Wall
-  build-depends: base, websockets, binary, bytestring, liszt, time
+  build-depends: base, bytestring, liszt
   default-language:    Haskell2010
 
 executable lisztd
   hs-source-dirs: app
   main-is: Server.hs
   ghc-options: -O2 -threaded -Wall
-  build-depends: base, websockets, binary, bytestring, liszt
+  build-depends: base, bytestring, liszt, websockets
   default-language:    Haskell2010
 
 source-repository head
