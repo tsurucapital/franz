@@ -15,11 +15,10 @@ cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src
-  exposed-modules:     Database.Liszt.Server, Database.Liszt.Types
+  exposed-modules:     Database.Liszt.Server, Database.Liszt.Client, Database.Liszt.Types
   build-depends:       base >= 4.7 && < 5
     , bytestring
     , directory
-    , vector
     , stm
     , binary
     , websockets
@@ -32,12 +31,14 @@ executable liszt
   main-is: Client.hs
   ghc-options: -O2 -threaded -Wall
   build-depends: base, websockets, binary, bytestring, liszt, time
+  default-language:    Haskell2010
 
 executable lisztd
   hs-source-dirs: app
   main-is: Server.hs
   ghc-options: -O2 -threaded -Wall
   build-depends: base, websockets, binary, bytestring, liszt
+  default-language:    Haskell2010
 
 source-repository head
   type:     git

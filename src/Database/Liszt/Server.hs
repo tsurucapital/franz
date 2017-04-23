@@ -28,26 +28,30 @@ handleConsumer :: FilePath
 handleConsumer path vIndices conn = do
   -- start from the beginning of the stream
   vOffset <- newTVarIO Nothing
+
+  let getPos = do
+        m <- readTVar vIndices
+        readTVar vOffset >>= \case
+          Nothing -> do
+            (ofs'@(_, pos), _) <- foldAlt $ M.minViewWithKey m
+            writeTVar vOffset (Just ofs')
+            return (0, pos)
+          Just (ofs, pos) -> do
+            ofs'@(_, pos') <- foldAlt $ M.lookupGT ofs m
+            writeTVar vOffset (Just ofs')
+            return (pos, pos')
+
+  let send (pos, pos') = withBinaryFile path ReadMode $ \h -> do
+        hSeek h AbsoluteSeek (fromIntegral pos)
+        bs <- B.hGet h $ fromIntegral $ pos' - pos
+        WS.sendBinaryData conn bs
+
   forever $ do
     req <- WS.receiveData conn
     case decode req of
-      Blocking -> do
-        (pos, pos') <- atomically $ do
-          m <- readTVar vIndices
-          readTVar vOffset >>= \case
-            Nothing -> do
-              (ofs'@(_, pos), _) <- foldAlt $ M.minViewWithKey m
-              writeTVar vOffset (Just ofs')
-              return (0, pos)
-            Just (ofs, pos) -> do
-              ofs'@(_, pos') <- foldAlt $ M.lookupGT ofs m
-              writeTVar vOffset (Just ofs')
-              return (pos, pos')
-
-        withBinaryFile path ReadMode $ \h -> do
-          hSeek h AbsoluteSeek (fromIntegral pos)
-          bs <- B.hGet h $ fromIntegral $ pos' - pos
-          WS.sendBinaryData conn bs
+      Blocking -> atomically getPos >>= send
+      NonBlocking -> join $ send <$> atomically getPos
+        <|> pure (WS.sendTextData conn ("EOF" :: BL.ByteString))
       Seek ofs -> atomically $ do
         m <- readTVar vIndices
         ofsPos <- foldAlt $ M.lookupLE (fromIntegral ofs) m
@@ -69,7 +73,7 @@ handleProducer path vIndices vUpdate conn = forever $ do
         Write o
           | maybe True ((o >) . fromIntegral . fst) maxOfs -> return $ fromIntegral o
           | otherwise -> fail "Monotonicity violation"
-        Sequential -> return $ maybe 0 (succ . fromIntegral . fst) maxOfs
+        WriteSeqNo -> return $ maybe 0 (succ . fromIntegral . fst) maxOfs
 
       h <- openBinaryFile path AppendMode
       BL.hPut h content
