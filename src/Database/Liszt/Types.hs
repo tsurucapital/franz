@@ -6,7 +6,7 @@ import Data.Binary.Get
 import Data.Binary.Put
 import Data.Int
 
-data ConsumerRequest = Blocking | NonBlocking | Seek !Int64
+data ConsumerRequest = Blocking | NonBlocking | Seek !Int64 deriving Show
 
 instance Binary ConsumerRequest where
   get = getWord8 >>= \case
@@ -20,6 +20,7 @@ instance Binary ConsumerRequest where
 
 data ProducerRequest = Write !Int64
   | WriteSeqNo
+  deriving Show
 
 instance Binary ProducerRequest where
   get = getWord8 >>= \case

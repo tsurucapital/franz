@@ -48,7 +48,7 @@ seek (Consumer conn) ofs = liftIO $ do
 newtype Producer = Producer Connection
 
 withProducer :: String -> Int -> (Producer -> IO a) -> IO a
-withProducer host port k = runClient host port "read" $ k . Producer
+withProducer host port k = runClient host port "write" $ k . Producer
 
 write :: MonadIO m => Producer -> Int64 -> B.ByteString -> m ()
 write (Producer conn) ofs bs = liftIO $ sendBinaryData conn $ runPut $ do

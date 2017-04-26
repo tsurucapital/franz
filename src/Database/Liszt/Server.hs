@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase, OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards, LambdaCase, OverloadedStrings, ViewPatterns, BangPatterns #-}
 module Database.Liszt.Server where
 
 import Control.Applicative
@@ -10,6 +10,7 @@ import Data.Binary.Get as B
 import Data.Binary.Put as B
 import Data.Int
 import Data.Semigroup
+import Data.String
 import Database.Liszt.Types
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
@@ -22,52 +23,67 @@ foldAlt :: Alternative f => Maybe a -> f a
 foldAlt (Just a) = pure a
 foldAlt Nothing = empty
 
+data System = System
+    { vPayload :: TVar (M.IntMap (B.ByteString, Int64))
+    -- A collection of payloads which are not available on disk.
+    , vIndices :: TVar (M.IntMap Int64)
+    }
+
 handleConsumer :: FilePath
-  -> TVar (M.IntMap Int64)
+  -> System
   -> WS.Connection -> IO ()
-handleConsumer path vIndices conn = do
+handleConsumer path System{..} conn = do
   -- start from the beginning of the stream
   vOffset <- newTVarIO Nothing
 
-  let getPos = do
-        m <- readTVar vIndices
-        readTVar vOffset >>= \case
-          Nothing -> do
-            (ofs'@(_, pos), _) <- foldAlt $ M.minViewWithKey m
-            writeTVar vOffset (Just ofs')
-            return (0, pos)
-          Just (ofs, pos) -> do
-            ofs'@(_, pos') <- foldAlt $ M.lookupGT ofs m
-            writeTVar vOffset (Just ofs')
-            return (pos, pos')
+  let getPos = readTVar vOffset >>= \case
+        Nothing -> do
+          m <- readTVar vIndices
+          (ofs'@(_, pos), _) <- foldAlt $ M.minViewWithKey m
+          writeTVar vOffset (Just ofs')
+          return $ Left (0, pos)
+        Just (ofs, pos) -> do
+          m <- readTVar vIndices
+          case M.lookupGT ofs m of
+            Just op@(_, pos') -> do
+              writeTVar vOffset (Just op)
+              return $ Left (pos, pos')
+            Nothing -> M.lookupGT ofs <$> readTVar vPayload >>= \case
+              Just (ofs', (bs, pos')) -> do
+                writeTVar vOffset $ Just (ofs', pos')
+                return $ Right bs
+              Nothing -> retry
 
-  let send (pos, pos') = withBinaryFile path ReadMode $ \h -> do
+  let send (Left (pos, pos')) = withBinaryFile path ReadMode $ \h -> do
         hSeek h AbsoluteSeek (fromIntegral pos)
         bs <- B.hGet h $ fromIntegral $ pos' - pos
         WS.sendBinaryData conn bs
+      send (Right bs) = WS.sendBinaryData conn bs
 
   forever $ do
     req <- WS.receiveData conn
-    case decode req of
-      Blocking -> atomically getPos >>= send
-      NonBlocking -> join $ send <$> atomically getPos
-        <|> pure (WS.sendTextData conn ("EOF" :: BL.ByteString))
-      Seek ofs -> atomically $ do
-        m <- readTVar vIndices
-        ofsPos <- foldAlt $ M.lookupLE (fromIntegral ofs) m
-        writeTVar vOffset (Just ofsPos)
+    case decodeOrFail req of
+      Right (_, _, r) -> case r of
+        Blocking -> atomically getPos >>= send
+        NonBlocking -> join $ send <$> atomically getPos
+          <|> pure (WS.sendTextData conn ("EOF" :: BL.ByteString))
+        Seek ofs -> atomically $ do
+          m <- readTVar vIndices
+          ofsPos <- foldAlt $ M.lookupLE (fromIntegral ofs) m
+          writeTVar vOffset (Just ofsPos)
+      Left (_, _, e) -> WS.sendClose conn (fromString e :: B.ByteString)
 
-handleProducer :: FilePath
-  -> TVar (M.IntMap Int64)
-  -> TVar Bool
+handleProducer :: System
   -> WS.Connection
   -> IO ()
-handleProducer path vIndices vUpdate conn = forever $ do
+handleProducer System{..} conn = forever $ do
   reqBS <- WS.receiveData conn
   case runGetOrFail get reqBS of
-    Right (content, _, req) -> do
-      maxOfs <- atomically
-        $ fmap fst . M.maxViewWithKey <$> readTVar vIndices
+    Right (BL.toStrict -> !content, _, req) -> atomically $ do
+      m <- readTVar vPayload
+      maxOfs <- case M.maxViewWithKey m of
+        Just ((k, (_, p)), _) -> return $ Just (k, p)
+        Nothing -> fmap fst <$> M.maxViewWithKey <$> readTVar vIndices
 
       ofs <- case req of
         Write o
@@ -75,14 +91,10 @@ handleProducer path vIndices vUpdate conn = forever $ do
           | otherwise -> fail "Monotonicity violation"
         WriteSeqNo -> return $ maybe 0 (succ . fromIntegral . fst) maxOfs
 
-      h <- openBinaryFile path AppendMode
-      BL.hPut h content
-      hClose h
+      let !pos' = maybe 0 snd maxOfs + fromIntegral (B.length content)
 
-      atomically $ do
-        let pos' = maybe 0 snd maxOfs + BL.length content
-        modifyTVar' vIndices $ M.insert ofs pos'
-        writeTVar vUpdate True
+      modifyTVar' vPayload $ M.insert ofs (content, pos')
+
     Left _ -> WS.sendClose conn ("Malformed request" :: B.ByteString)
 
 loadIndices :: FilePath -> IO (M.IntMap Int64)
@@ -93,12 +105,6 @@ loadIndices path = doesFileExist path >>= \case
     bs <- BL.readFile path
     return $! M.fromAscList $ runGet (replicateM n $ (,) <$> get <*> get) bs
 
-saveIndices :: FilePath -> M.IntMap Int64 -> IO ()
-saveIndices path m
-  | M.null m = return ()
-  | otherwise = BL.appendFile path
-    $ B.runPut $ forM_ (M.toList m) $ \(k, v) -> B.put k >> B.put v
-
 openLisztServer :: FilePath -> IO WS.ServerApp
 openLisztServer path = do
   let ipath = path ++ ".indices"
@@ -106,27 +112,30 @@ openLisztServer path = do
 
   vIndices <- loadIndices ipath >>= newTVarIO
 
-  -- Persist indices
-  vUpdate <- newTVarIO False
-  vLastSynced <- atomically $ do
-    m <- readTVar vIndices
-    newTVar $ fst . fst <$> M.maxViewWithKey m
+  vPayload <- newTVarIO M.empty
 
+  -- synchronise payloads
   _ <- forkIO $ forever $ do
-    w <- atomically $ do
-      b <- readTVar vUpdate
-      unless b retry
-
-      ofs <- readTVar vLastSynced
-      m <- readTVar vIndices
-      let w = maybe m (\k -> let (_, _, r) = M.splitLookup k m in r) ofs
-      forM_ (M.maxViewWithKey w)
-        $ \((k, _), _) -> writeTVar vLastSynced (Just k)
+    m <- atomically $ do
+      w <- readTVar vPayload
+      when (M.null w) retry
       return w
 
-    saveIndices ipath w
+    -- TODO: handle exceptions
+    h <- openBinaryFile ppath AppendMode
+    mapM_ (B.hPut h . fst) m
+    hClose h
+
+    BL.appendFile ipath
+      $ B.runPut $ forM_ (M.toList m) $ \(k, (_, p)) -> B.put k >> B.put p
+
+    atomically $ do
+      modifyTVar' vIndices $ M.union (fmap snd m)
+      modifyTVar' vPayload $ flip M.difference m
+
+  let sys = System{..}
 
   return $ \pending -> case WS.requestPath (WS.pendingRequest pending) of
-    "read" -> WS.acceptRequest pending >>= handleConsumer ppath vIndices
-    "write" -> WS.acceptRequest pending >>= handleProducer ppath vIndices vUpdate
+    "read" -> WS.acceptRequest pending >>= handleConsumer ppath sys
+    "write" -> WS.acceptRequest pending >>= handleProducer sys
     p -> WS.rejectRequest pending ("Bad request: " <> p)
