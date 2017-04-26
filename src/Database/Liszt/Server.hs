@@ -80,20 +80,26 @@ handleProducer System{..} conn = forever $ do
   reqBS <- WS.receiveData conn
   case runGetOrFail get reqBS of
     Right (BL.toStrict -> !content, _, req) -> atomically $ do
+
+      let !len = fromIntegral (B.length content)
+
+      let g o p = modifyTVar' vPayload $ M.insert o (content, p + len)
+
       m <- readTVar vPayload
+
       maxOfs <- case M.maxViewWithKey m of
         Just ((k, (_, p)), _) -> return $ Just (k, p)
         Nothing -> fmap fst <$> M.maxViewWithKey <$> readTVar vIndices
 
-      ofs <- case req of
-        Write o
-          | maybe True ((o >) . fromIntegral . fst) maxOfs -> return $ fromIntegral o
-          | otherwise -> fail "Monotonicity violation"
-        WriteSeqNo -> return $ maybe 0 (succ . fromIntegral . fst) maxOfs
-
-      let !pos' = maybe 0 snd maxOfs + fromIntegral (B.length content)
-
-      modifyTVar' vPayload $ M.insert ofs (content, pos')
+      case req of
+        Write o -> case maxOfs of
+          Just (k, p)
+            | k <= fromIntegral o -> g (fromIntegral o) p
+            | otherwise -> fail "Monotonicity violation"
+          Nothing -> g (fromIntegral o) 0
+        WriteSeqNo -> case maxOfs of
+          Just (k, p) -> g (k + 1) p
+          Nothing -> g 0 0
 
     Left _ -> WS.sendClose conn ("Malformed request" :: B.ByteString)
 
