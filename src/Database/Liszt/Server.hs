@@ -1,5 +1,5 @@
 {-# LANGUAGE RecordWildCards, LambdaCase, OverloadedStrings, ViewPatterns, BangPatterns #-}
-module Database.Liszt.Server where
+module Database.Liszt.Server (openLisztServer) where
 
 import Control.Applicative
 import Control.Concurrent
