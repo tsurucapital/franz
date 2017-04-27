@@ -27,12 +27,18 @@ data System = System
     { vPayload :: TVar (M.IntMap (B.ByteString, Int64))
     -- A collection of payloads which are not available on disk.
     , vIndices :: TVar (M.IntMap Int64)
+    , vAccess :: TVar Bool
+    , theHandle :: Handle
     }
 
-handleConsumer :: FilePath
-  -> System
+acquire :: TVar Bool -> STM ()
+acquire v = do
+  b <- readTVar v
+  if b then retry else writeTVar v True
+
+handleConsumer :: System
   -> WS.Connection -> IO ()
-handleConsumer path System{..} conn = do
+handleConsumer System{..} conn = do
   -- start from the beginning of the stream
   vOffset <- newTVarIO Nothing
 
@@ -54,9 +60,11 @@ handleConsumer path System{..} conn = do
                 return $ Right bs
               Nothing -> retry
 
-  let send (Left (pos, pos')) = withBinaryFile path ReadMode $ \h -> do
-        hSeek h AbsoluteSeek (fromIntegral pos)
-        bs <- B.hGet h $ fromIntegral $ pos' - pos
+  let send (Left (pos, pos')) = do
+        atomically $ acquire vAccess
+        hSeek theHandle AbsoluteSeek (fromIntegral pos)
+        bs <- B.hGet theHandle $ fromIntegral $ pos' - pos
+        atomically $ writeTVar vAccess False
         WS.sendBinaryData conn bs
       send (Right bs) = WS.sendBinaryData conn bs
 
@@ -120,17 +128,24 @@ openLisztServer path = do
 
   vPayload <- newTVarIO M.empty
 
+  vAccess <- newTVarIO False
+
+  theHandle <- openBinaryFile ppath ReadWriteMode
+
   -- synchronise payloads
   _ <- forkIO $ forever $ do
     m <- atomically $ do
       w <- readTVar vPayload
       when (M.null w) retry
+      acquire vAccess
       return w
 
     -- TODO: handle exceptions
-    h <- openBinaryFile ppath AppendMode
-    mapM_ (B.hPut h . fst) m
-    hClose h
+
+    hSeek theHandle SeekFromEnd 0
+    mapM_ (B.hPut theHandle . fst) m
+
+    atomically $ writeTVar vAccess False
 
     BL.appendFile ipath
       $ B.runPut $ forM_ (M.toList m) $ \(k, (_, p)) -> B.put k >> B.put p
@@ -142,6 +157,6 @@ openLisztServer path = do
   let sys = System{..}
 
   return $ \pending -> case WS.requestPath (WS.pendingRequest pending) of
-    "read" -> WS.acceptRequest pending >>= handleConsumer ppath sys
+    "read" -> WS.acceptRequest pending >>= handleConsumer sys
     "write" -> WS.acceptRequest pending >>= handleProducer sys
     p -> WS.rejectRequest pending ("Bad request: " <> p)
