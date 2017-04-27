@@ -89,11 +89,12 @@ handleProducer :: System
 handleProducer System{..} conn = forever $ do
   reqBS <- WS.receiveData conn
   case runGetOrFail get reqBS of
-    Right (BL.toStrict -> !content, _, req) -> atomically $ do
+    Right (BL.toStrict -> !content, _, req) -> join $ atomically $ do
 
       let !len = fromIntegral (B.length content)
 
-      let g o p = modifyTVar' vPayload $ M.insert o (content, p + len)
+      let g o p = return ()
+            <$ modifyTVar' vPayload (M.insert o (content, p + len))
 
       m <- readTVar vPayload
 
@@ -105,7 +106,8 @@ handleProducer System{..} conn = forever $ do
         Write o -> case maxOfs of
           Just (k, p)
             | k <= fromIntegral o -> g (fromIntegral o) p
-            | otherwise -> fail "Monotonicity violation"
+            | otherwise -> return
+                $ WS.sendClose conn ("Monotonicity violation" :: B.ByteString)
           Nothing -> g (fromIntegral o) 0
         WriteSeqNo -> case maxOfs of
           Just (k, p) -> g (k + 1) p
