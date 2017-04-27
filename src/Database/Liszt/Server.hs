@@ -154,7 +154,8 @@ openLisztServer path = do
 
   let sys = System{..}
 
-  _ <- forkIO $ synchronise ipath sys
+  _ <- forkIO $ forever $ synchronise ipath sys
+    `catch` \e -> hPutStrLn stderr $ "synchronise: " ++ show (e :: IOException)
 
   return $ \pending -> case WS.requestPath (WS.pendingRequest pending) of
     "read" -> WS.acceptRequest pending >>= handleConsumer sys
