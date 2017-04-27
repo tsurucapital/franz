@@ -119,6 +119,26 @@ loadIndices path = doesFileExist path >>= \case
     bs <- BL.readFile path
     return $! M.fromAscList $ runGet (replicateM n $ (,) <$> get <*> get) bs
 
+synchronise :: FilePath -> System -> IO ()
+synchronise ipath System{..} = forever $ do
+  m <- atomically $ do
+    w <- readTVar vPayload
+    when (M.null w) retry
+    acquire vAccess
+    return w
+
+  hSeek theHandle SeekFromEnd 0
+  mapM_ (B.hPut theHandle . fst) m
+
+  atomically $ writeTVar vAccess False
+
+  BL.appendFile ipath
+    $ B.runPut $ forM_ (M.toList m) $ \(k, (_, p)) -> B.put k >> B.put p
+
+  atomically $ do
+    modifyTVar' vIndices $ M.union (fmap snd m)
+    modifyTVar' vPayload $ flip M.difference m
+
 openLisztServer :: FilePath -> IO WS.ServerApp
 openLisztServer path = do
   let ipath = path ++ ".indices"
@@ -132,29 +152,9 @@ openLisztServer path = do
 
   theHandle <- openBinaryFile ppath ReadWriteMode
 
-  -- synchronise payloads
-  _ <- forkIO $ forever $ do
-    m <- atomically $ do
-      w <- readTVar vPayload
-      when (M.null w) retry
-      acquire vAccess
-      return w
-
-    -- TODO: handle exceptions
-
-    hSeek theHandle SeekFromEnd 0
-    mapM_ (B.hPut theHandle . fst) m
-
-    atomically $ writeTVar vAccess False
-
-    BL.appendFile ipath
-      $ B.runPut $ forM_ (M.toList m) $ \(k, (_, p)) -> B.put k >> B.put p
-
-    atomically $ do
-      modifyTVar' vIndices $ M.union (fmap snd m)
-      modifyTVar' vPayload $ flip M.difference m
-
   let sys = System{..}
+
+  _ <- forkIO $ synchronise ipath sys
 
   return $ \pending -> case WS.requestPath (WS.pendingRequest pending) of
     "read" -> WS.acceptRequest pending >>= handleConsumer sys
