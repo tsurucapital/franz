@@ -70,17 +70,19 @@ handleConsumer System{..} conn = do
         WS.sendBinaryData conn bs
       send (Right bs) = WS.sendBinaryData conn bs
 
+  let sendEOF = WS.sendTextData conn ("EOF" :: BL.ByteString)
+
   forever $ do
     req <- WS.receiveData conn
     case decodeOrFail req of
       Right (_, _, r) -> case r of
         Blocking -> atomically getPos >>= send
-        NonBlocking -> join $ send <$> atomically getPos
-          <|> pure (WS.sendTextData conn ("EOF" :: BL.ByteString))
-        Seek ofs -> atomically $ do
+        NonBlocking -> join $ send <$> atomically getPos <|> pure sendEOF
+        Seek ofs -> join $ atomically (pure () <$ do
           m <- readTVar vIndices
           ofsPos <- foldAlt $ M.lookupLE (fromIntegral ofs) m
-          writeTVar vOffset (Just ofsPos)
+          writeTVar vOffset (Just ofsPos))
+          <|> pure sendEOF
       Left (_, _, e) -> WS.sendClose conn (fromString e :: B.ByteString)
 
 handleProducer :: System
