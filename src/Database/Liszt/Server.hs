@@ -4,6 +4,7 @@ module Database.Liszt.Server where
 import Control.Applicative
 import Control.Concurrent
 import Control.Concurrent.STM
+import Control.Exception
 import Control.Monad
 import Data.Binary as B
 import Data.Binary.Get as B
@@ -31,10 +32,12 @@ data System = System
     , theHandle :: Handle
     }
 
-acquire :: TVar Bool -> STM ()
-acquire v = do
-  b <- readTVar v
-  if b then retry else writeTVar v True
+acquire :: TVar Bool -> IO a -> IO a
+acquire v m = do
+  atomically $ do
+    b <- readTVar v
+    if b then retry else writeTVar v True
+  m `finally` atomically (writeTVar v False)
 
 handleConsumer :: System
   -> WS.Connection -> IO ()
@@ -61,10 +64,9 @@ handleConsumer System{..} conn = do
               Nothing -> retry
 
   let send (Left (pos, pos')) = do
-        atomically $ acquire vAccess
-        hSeek theHandle AbsoluteSeek (fromIntegral pos)
-        bs <- B.hGet theHandle $ fromIntegral $ pos' - pos
-        atomically $ writeTVar vAccess False
+        bs <- acquire vAccess $ do
+          hSeek theHandle AbsoluteSeek (fromIntegral pos)
+          B.hGet theHandle $ fromIntegral $ pos' - pos
         WS.sendBinaryData conn bs
       send (Right bs) = WS.sendBinaryData conn bs
 
@@ -124,13 +126,11 @@ synchronise ipath System{..} = forever $ do
   m <- atomically $ do
     w <- readTVar vPayload
     when (M.null w) retry
-    acquire vAccess
     return w
 
-  hSeek theHandle SeekFromEnd 0
-  mapM_ (B.hPut theHandle . fst) m
-
-  atomically $ writeTVar vAccess False
+  acquire vAccess $ do
+    hSeek theHandle SeekFromEnd 0
+    mapM_ (B.hPut theHandle . fst) m
 
   BL.appendFile ipath
     $ B.runPut $ forM_ (M.toList m) $ \(k, (_, p)) -> B.put k >> B.put p
