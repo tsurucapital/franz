@@ -142,7 +142,13 @@ synchronise ipath System{..} = forever $ do
     modifyTVar' vIndices $ M.union (fmap snd m)
     modifyTVar' vPayload $ flip M.difference m
 
-openLisztServer :: FilePath -> IO WS.ServerApp
+-- | Start a liszt server. 'openLisztServer "foo"' creates two files:
+--
+-- * @foo.indices@: A list of offsets.
+--
+-- * @foo.payload@: All payloads concatenated as one file.
+--
+openLisztServer :: FilePath -> IO (ThreadId, WS.ServerApp)
 openLisztServer path = do
   let ipath = path ++ ".indices"
   let ppath = path ++ ".payload"
@@ -157,10 +163,10 @@ openLisztServer path = do
 
   let sys = System{..}
 
-  _ <- forkIO $ forever $ synchronise ipath sys
+  tid <- forkIO $ forever $ synchronise ipath sys
     `catch` \e -> hPutStrLn stderr $ "synchronise: " ++ show (e :: IOException)
 
-  return $ \pending -> case WS.requestPath (WS.pendingRequest pending) of
+  return (tid, \pending -> case WS.requestPath (WS.pendingRequest pending) of
     "read" -> WS.acceptRequest pending >>= handleConsumer sys
     "write" -> WS.acceptRequest pending >>= handleProducer sys
-    p -> WS.rejectRequest pending ("Bad request: " <> p)
+    p -> WS.rejectRequest pending ("Bad request: " <> p))

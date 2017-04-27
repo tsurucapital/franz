@@ -22,6 +22,6 @@ withHostPort args k = case getOpt Permute hostPort args of
 
 main :: IO ()
 main = getArgs >>= \args -> withHostPort args $ \host port [path] -> do
-  app <- openLisztServer path
+  (_, app) <- openLisztServer path
 
   runServer host port app
