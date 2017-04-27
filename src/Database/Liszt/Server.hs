@@ -63,17 +63,15 @@ handleConsumer System{..} conn = do
                 return $ Right bs
               Nothing -> retry
 
-  let send (Left (pos, pos')) = do
-        bs <- acquire vAccess $ do
-          hSeek theHandle AbsoluteSeek (fromIntegral pos)
-          B.hGet theHandle $ fromIntegral $ pos' - pos
-        WS.sendBinaryData conn bs
-      send (Right bs) = WS.sendBinaryData conn bs
+  let fetch (Left (pos, pos')) = acquire vAccess $ do
+        hSeek theHandle AbsoluteSeek (fromIntegral pos)
+        B.hGet theHandle $ fromIntegral $ pos' - pos
+      fetch (Right bs) = return bs
 
   let sendEOF = WS.sendTextData conn ("EOF" :: BL.ByteString)
 
   let transaction (NonBlocking r) = transaction r <|> pure sendEOF
-      transaction Read = send <$> getPos
+      transaction Read = (fetch >=> WS.sendBinaryData conn) <$> getPos
       transaction (Seek ofs) = do
         m <- readTVar vIndices
         ofsPos <- foldAlt $ M.lookupLE (fromIntegral ofs) m
