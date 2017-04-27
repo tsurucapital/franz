@@ -6,17 +6,19 @@ import Data.Binary.Get
 import Data.Binary.Put
 import Data.Int
 
-data ConsumerRequest = Blocking | NonBlocking | Seek !Int64 deriving Show
+data ConsumerRequest = Read
+  | Seek !Int64
+  | NonBlocking ConsumerRequest deriving Show
 
 instance Binary ConsumerRequest where
   get = getWord8 >>= \case
-    66{-B-} -> return Blocking
-    78{-N-} -> return NonBlocking
+    78{-N-} -> NonBlocking <$> get
+    82{-R-} -> pure Read
     83{-S-} -> Seek <$> getInt64le
     _ -> fail "Unknown tag"
-  put Blocking = putWord8 66
-  put NonBlocking = putWord8 78
+  put Read = putWord8 82
   put (Seek b) = putWord8 83 >> putInt64le b
+  put (NonBlocking r) = putWord8 78 >> put r
 
 data ProducerRequest = Write !Int64
   | WriteSeqNo

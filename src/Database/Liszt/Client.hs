@@ -30,12 +30,12 @@ withConsumer host port k = runClient host port "read" $ k . Consumer
 
 readBlocking :: MonadIO m => Consumer -> m B.ByteString
 readBlocking (Consumer conn) = liftIO $ do
-  sendBinaryData conn $ encode Blocking
+  sendBinaryData conn $ encode Read
   receiveData conn
 
 readNonBlocking :: MonadIO m => Consumer -> m (Maybe B.ByteString)
 readNonBlocking (Consumer conn) = liftIO $ do
-  sendBinaryData conn $ encode NonBlocking
+  sendBinaryData conn $ encode $ NonBlocking Read
   receiveDataMessage conn >>= \case
     Text "EOF" -> return Nothing
     Binary bs -> return $ Just $! BL.toStrict bs
