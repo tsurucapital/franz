@@ -134,6 +134,7 @@ synchronise ipath System{..} = forever $ do
   acquire vAccess $ do
     hSeek theHandle SeekFromEnd 0
     mapM_ (B.hPut theHandle . fst) m
+    hFlush theHandle
 
   BL.appendFile ipath
     $ B.runPut $ forM_ (M.toList m) $ \(k, (_, p)) -> B.put k >> B.put p
@@ -160,6 +161,7 @@ openLisztServer path = do
   vAccess <- newTVarIO False
 
   theHandle <- openBinaryFile ppath ReadWriteMode
+  hSetBuffering theHandle (BlockBuffering Nothing)
 
   let sys = System{..}
 
