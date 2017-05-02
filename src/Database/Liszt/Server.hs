@@ -43,25 +43,19 @@ handleConsumer :: System
   -> WS.Connection -> IO ()
 handleConsumer System{..} conn = do
   -- start from the beginning of the stream
-  vOffset <- newTVarIO Nothing
+  vOffset <- newTVarIO minBound
 
-  let getPos = readTVar vOffset >>= \case
-        Nothing -> do
-          m <- readTVar vIndices
-          (ofs'@(_, pos), _) <- foldAlt $ M.minViewWithKey m
-          writeTVar vOffset (Just ofs')
-          return $ Left (0, pos)
-        Just (ofs, pos) -> do
-          m <- readTVar vIndices
-          case M.lookupGT ofs m of
-            Just op@(_, pos') -> do
-              writeTVar vOffset (Just op)
-              return $ Left (pos, pos')
-            Nothing -> M.lookupGT ofs <$> readTVar vPayload >>= \case
-              Just (ofs', (bs, pos')) -> do
-                writeTVar vOffset $ Just (ofs', pos')
-                return $ Right bs
-              Nothing -> retry
+  let getPos = readTVar vOffset >>= \(ofs, pos) -> do
+        m <- readTVar vIndices
+        case M.lookupGT ofs m of
+          Just op@(_, pos') -> do
+            writeTVar vOffset op
+            return $ Left (pos, pos')
+          Nothing -> M.lookupGT ofs <$> readTVar vPayload >>= \case
+            Just (ofs', (bs, pos')) -> do
+              writeTVar vOffset (ofs', pos')
+              return $ Right bs
+            Nothing -> retry
 
   let fetch (Left (pos, pos')) = acquire vAccess $ do
         hSeek theHandle AbsoluteSeek (fromIntegral pos)
@@ -75,7 +69,7 @@ handleConsumer System{..} conn = do
       transaction (Seek ofs) = do
         m <- readTVar vIndices
         ofsPos <- foldAlt $ M.lookupLE (fromIntegral ofs) m
-        writeTVar vOffset (Just ofsPos)
+        writeTVar vOffset ofsPos
         return $ WS.sendTextData conn ("Done" :: BL.ByteString)
 
   forever $ do
