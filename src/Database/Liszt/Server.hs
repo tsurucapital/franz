@@ -85,17 +85,14 @@ handleProducer System{..} conn = forever $ do
   reqBS <- WS.receiveData conn
   case runGetOrFail get reqBS of
     Right (BL.toStrict -> !content, _, req) -> join $ atomically $ do
-
-      let !len = fromIntegral (B.length content)
-
-      let g o p = return ()
-            <$ modifyTVar' vPayload (M.insert o (content, p + len))
-
       m <- readTVar vPayload
 
       maxOfs <- case M.maxViewWithKey m of
         Just ((k, (_, p)), _) -> return $ Just (k, p)
         Nothing -> fmap fst <$> M.maxViewWithKey <$> readTVar vIndices
+
+      let g o p = let !p' = p + fromIntegral (B.length content)
+            in return () <$ modifyTVar' vPayload (M.insert o (content, p'))
 
       case req of
         Write o -> case maxOfs of
