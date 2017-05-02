@@ -39,33 +39,33 @@ acquire v m = do
     if b then retry else writeTVar v True
   m `finally` atomically (writeTVar v False)
 
-handleConsumer :: System
-  -> WS.Connection -> IO ()
-handleConsumer System{..} conn = do
-  -- start from the beginning of the stream
-  vOffset <- newTVarIO minBound
-
-  let getPos = readTVar vOffset >>= \(ofs, pos) -> do
-        m <- readTVar vIndices
-        case M.lookupGT ofs m of
-          Just op@(_, pos') -> do
-            writeTVar vOffset op
-            return $ Left (pos, pos')
-          Nothing -> M.lookupGT ofs <$> readTVar vPayload >>= \case
-            Just (ofs', (bs, pos')) -> do
-              writeTVar vOffset (ofs', pos')
-              return $ Right bs
-            Nothing -> retry
-
-  let fetch (Left (pos, pos')) = acquire vAccess $ do
+fetchPayload :: System
+  -> TVar (M.Key, Int64)
+  -> STM (IO B.ByteString)
+fetchPayload System{..} v = readTVar v >>= \(ofs, pos) -> do
+  m <- readTVar vIndices
+  case M.lookupGT ofs m of
+    Just op@(_, pos') -> do
+      writeTVar v op
+      return $ acquire vAccess $ do
         hSeek theHandle AbsoluteSeek (fromIntegral pos)
         B.hGet theHandle $ fromIntegral $ pos' - pos
-      fetch (Right bs) = return bs
+    Nothing -> M.lookupGT ofs <$> readTVar vPayload >>= \case
+      Just (ofs', (bs, pos')) -> do
+        writeTVar v (ofs', pos')
+        return $ return bs
+      Nothing -> retry
+
+handleConsumer :: System
+  -> WS.Connection -> IO ()
+handleConsumer sys@System{..} conn = do
+  -- start from the beginning of the stream
+  vOffset <- newTVarIO minBound
 
   let sendEOF = WS.sendTextData conn ("EOF" :: BL.ByteString)
 
   let transaction (NonBlocking r) = transaction r <|> pure sendEOF
-      transaction Read = (fetch >=> WS.sendBinaryData conn) <$> getPos
+      transaction Read = (>>=WS.sendBinaryData conn) <$> fetchPayload sys vOffset
       transaction (Seek ofs) = do
         m <- readTVar vIndices
         ofsPos <- foldAlt $ M.lookupLE (fromIntegral ofs) m
