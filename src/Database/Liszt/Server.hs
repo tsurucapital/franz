@@ -60,7 +60,7 @@ handleConsumer :: System
   -> WS.Connection -> IO ()
 handleConsumer sys@System{..} conn = do
   -- start from the beginning of the stream
-  vOffset <- newTVarIO minBound
+  vOffset <- newTVarIO (minBound, 0)
 
   let sendEOF = WS.sendTextData conn ("EOF" :: BL.ByteString)
 
