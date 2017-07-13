@@ -5,7 +5,7 @@ Liszt is a publish & subscribe persistent messaging system.
 `lisztd` starts a server. One liszt server has one stream.
 
 ```
-$ lisztd
+$ lisztd foo
 ```
 
 Consume the stream from the beginning:
