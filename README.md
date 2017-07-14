@@ -2,20 +2,20 @@
 
 Liszt is a publish & subscribe persistent messaging system.
 
-`lisztd` starts a server. One liszt server has one stream.
+`lisztd` starts a server.
 
 ```
-$ lisztd foo
+$ lisztd
 ```
 
 Consume the stream from the beginning:
 
 ```
-$ liszt read localhost
+$ liszt read localhost foo
 ```
 
 Send data from stdin to the liszt:
 
 ```
-$ liszt write localhost
+$ liszt write localhost foo
 ```

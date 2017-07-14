@@ -27,8 +27,8 @@ import Network.WebSockets
 newtype Consumer = Consumer Connection
 
 -- | Acquire a consumer.
-withConsumer :: String -> Int -> (Consumer -> IO a) -> IO a
-withConsumer host port k = runClient host port "read" $ k . Consumer
+withConsumer :: String -> Int -> String -> (Consumer -> IO a) -> IO a
+withConsumer host port name k = runClient host port (name ++ "/read") $ k . Consumer
 
 -- | Fetch a payload.
 readBlocking :: MonadIO m => Consumer -> m B.ByteString
@@ -54,8 +54,8 @@ seek (Consumer conn) ofs = liftIO $ do
 newtype Producer = Producer Connection
 
 -- | Acquire a producer.
-withProducer :: String -> Int -> (Producer -> IO a) -> IO a
-withProducer host port k = runClient host port "write" $ k . Producer
+withProducer :: String -> Int -> String -> (Producer -> IO a) -> IO a
+withProducer host port name k = runClient host port (name ++ "/write") $ k . Producer
 
 -- | Write a payload with the specified offset. If the offset is less than the
 -- last offset, it fails as 'ConnectionException'.
