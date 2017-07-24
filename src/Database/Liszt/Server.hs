@@ -26,12 +26,17 @@ foldAlt Nothing = empty
 
 data System = System
     { vPayload :: TVar (M.IntMap (B.ByteString, Int64))
-    -- A collection of payloads which are not available on disk.
+    -- ^ A collection of payloads which are not available on disk.
     , vIndices :: TVar (M.IntMap Int64)
+    -- ^ Map of byte offsets
     , vAccess :: TVar Bool
+    -- ^ Is the payload file in use?
     , theHandle :: Handle
+    -- ^ The handle of the payload
     }
 
+-- | Set the 'TVar' True while running the action.
+-- It blocks if the TVar is already True.
 acquire :: TVar Bool -> IO a -> IO a
 acquire v m = do
   atomically $ do
@@ -39,10 +44,12 @@ acquire v m = do
     if b then retry else writeTVar v True
   m `finally` atomically (writeTVar v False)
 
+-- | Read the payload at the position in 'TVar', and update it by the next position.
 fetchPayload :: System
   -> TVar (M.Key, Int64)
   -> STM (IO B.ByteString)
-fetchPayload System{..} v = readTVar v >>= \(ofs, pos) -> do
+fetchPayload System{..} v = do
+  (ofs, pos) <- readTVar v
   m <- readTVar vIndices
   case M.lookupGT ofs m of
     Just op@(_, pos') -> do
@@ -56,15 +63,13 @@ fetchPayload System{..} v = readTVar v >>= \(ofs, pos) -> do
         return $ return bs
       Nothing -> retry
 
-handleConsumer :: System
-  -> WS.Connection -> IO ()
+handleConsumer :: System -> WS.Connection -> IO ()
 handleConsumer sys@System{..} conn = do
   -- start from the beginning of the stream
   vOffset <- newTVarIO (minBound, 0)
 
-  let sendEOF = WS.sendTextData conn ("EOF" :: BL.ByteString)
-
-  let transaction (NonBlocking r) = transaction r <|> pure sendEOF
+  let transaction (NonBlocking r) = transaction r
+        <|> pure (WS.sendTextData conn ("EOF" :: BL.ByteString))
       transaction Read = (>>=WS.sendBinaryData conn) <$> fetchPayload sys vOffset
       transaction (Seek ofs) = do
         m <- readTVar vIndices
@@ -78,9 +83,7 @@ handleConsumer sys@System{..} conn = do
       Right (_, _, r) -> join $ atomically $ transaction r
       Left (_, _, e) -> WS.sendClose conn (fromString e :: B.ByteString)
 
-handleProducer :: System
-  -> WS.Connection
-  -> IO ()
+handleProducer :: System -> WS.Connection -> IO ()
 handleProducer System{..} conn = forever $ do
   reqBS <- WS.receiveData conn
   case runGetOrFail get reqBS of
@@ -91,19 +94,19 @@ handleProducer System{..} conn = forever $ do
         Just ((k, (_, p)), _) -> return $ Just (k, p)
         Nothing -> fmap fst <$> M.maxViewWithKey <$> readTVar vIndices
 
-      let g o p = let !p' = p + fromIntegral (B.length content)
+      let push o p = let !p' = p + fromIntegral (B.length content)
             in return () <$ modifyTVar' vPayload (M.insert o (content, p'))
 
       case req of
         Write o -> case maxOfs of
           Just (k, p)
-            | k <= fromIntegral o -> g (fromIntegral o) p
+            | k <= fromIntegral o -> push (fromIntegral o) p
             | otherwise -> return
                 $ WS.sendClose conn ("Monotonicity violation" :: B.ByteString)
-          Nothing -> g (fromIntegral o) 0
+          Nothing -> push (fromIntegral o) 0
         WriteSeqNo -> case maxOfs of
-          Just (k, p) -> g (k + 1) p
-          Nothing -> g 0 0
+          Just (k, p) -> push (k + 1) p
+          Nothing -> push 0 0
 
     Left _ -> WS.sendClose conn ("Malformed request" :: B.ByteString)
 
