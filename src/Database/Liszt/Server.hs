@@ -20,10 +20,6 @@ import qualified Network.WebSockets as WS
 import System.Directory
 import System.IO
 
-foldAlt :: Alternative f => Maybe a -> f a
-foldAlt (Just a) = pure a
-foldAlt Nothing = empty
-
 data System = System
     { vPayload :: TVar (M.IntMap (B.ByteString, Int64))
     -- ^ A collection of payloads which are not available on disk.
@@ -73,9 +69,8 @@ handleConsumer sys@System{..} conn = do
       transaction Read = (>>=WS.sendBinaryData conn) <$> fetchPayload sys vOffset
       transaction (Seek ofs) = do
         m <- readTVar vIndices
-        ofsPos <- foldAlt $ M.lookupLE (fromIntegral ofs) m
-        writeTVar vOffset ofsPos
-        return $ WS.sendTextData conn ("Done" :: BL.ByteString)
+        mapM_ (writeTVar vOffset) $ M.lookupLE (fromIntegral ofs) m
+        return $ return ()
 
   forever $ do
     req <- WS.receiveData conn

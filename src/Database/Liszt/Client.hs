@@ -47,8 +47,7 @@ readNonBlocking (Consumer conn) = liftIO $ do
 
 -- | Seek to a specicied position.
 seek :: MonadIO m => Consumer -> Int64 -> m ()
-seek (Consumer conn) ofs = liftIO $ do
-  sendBinaryData conn $ encode $ Seek ofs
+seek (Consumer conn) ofs = liftIO $ sendBinaryData conn $ encode $ Seek ofs
 
 -- | Connection as a producer
 newtype Producer = Producer Connection
