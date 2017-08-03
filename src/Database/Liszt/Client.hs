@@ -6,6 +6,7 @@ module Database.Liszt.Client (
   , readBlocking
   , readNonBlocking
   , seek
+  , peek
   -- * Producer
   , Producer
   , withProducer
@@ -48,6 +49,12 @@ readNonBlocking (Consumer conn) = liftIO $ do
 -- | Seek to a specicied position.
 seek :: MonadIO m => Consumer -> Int64 -> m ()
 seek (Consumer conn) ofs = liftIO $ sendBinaryData conn $ encode $ Seek ofs
+
+-- | Returns the next offset.
+peek :: MonadIO m => Consumer -> m Int64
+peek (Consumer conn) = liftIO $ do
+  sendBinaryData conn $ encode Peek
+  decode <$> receiveData conn
 
 -- | Connection as a producer
 newtype Producer = Producer Connection

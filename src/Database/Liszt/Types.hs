@@ -7,15 +7,18 @@ import Data.Binary.Put
 import Data.Int
 
 data ConsumerRequest = Read
+  | Peek
   | Seek !Int64
   | NonBlocking ConsumerRequest deriving Show
 
 instance Binary ConsumerRequest where
   get = getWord8 >>= \case
     78{-N-} -> NonBlocking <$> get
+    80{-P-} -> pure Peek
     82{-R-} -> pure Read
     83{-S-} -> Seek <$> getInt64le
     _ -> fail "Unknown tag"
+  put Peek = putWord8 80
   put Read = putWord8 82
   put (Seek b) = putWord8 83 >> putInt64le b
   put (NonBlocking r) = putWord8 78 >> put r

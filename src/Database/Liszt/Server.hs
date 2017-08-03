@@ -67,6 +67,8 @@ handleConsumer sys@System{..} conn = do
   let transaction (NonBlocking r) = transaction r
         <|> pure (WS.sendTextData conn ("EOF" :: BL.ByteString))
       transaction Read = (>>=WS.sendBinaryData conn) <$> fetchPayload sys vOffset
+      transaction Peek = WS.sendBinaryData conn . encode . fst
+          <$> readTVar vOffset
       transaction (Seek ofs) = do
         m <- readTVar vIndices
         mapM_ (writeTVar vOffset) $ M.lookupLE (fromIntegral ofs) m
