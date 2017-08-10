@@ -71,7 +71,7 @@ handleConsumer sys@System{..} conn = do
           <$> readTVar vOffset
       transaction (Seek ofs) = do
         m <- readTVar vIndices
-        mapM_ (writeTVar vOffset) $ M.lookupLE (fromIntegral ofs) m
+        writeTVar vOffset $ maybe (minBound, 0) id $ M.lookupLT (fromIntegral ofs) m
         return $ return ()
 
   forever $ do
