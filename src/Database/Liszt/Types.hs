@@ -16,11 +16,11 @@ instance Binary ConsumerRequest where
     78{-N-} -> NonBlocking <$> get
     80{-P-} -> pure Peek
     82{-R-} -> pure Read
-    83{-S-} -> Seek <$> getInt64le
+    83{-S-} -> Seek <$> get
     _ -> fail "Unknown tag"
   put Peek = putWord8 80
   put Read = putWord8 82
-  put (Seek b) = putWord8 83 >> putInt64le b
+  put (Seek b) = putWord8 83 >> put b
   put (NonBlocking r) = putWord8 78 >> put r
 
 data ProducerRequest = Write !Int64
@@ -29,8 +29,8 @@ data ProducerRequest = Write !Int64
 
 instance Binary ProducerRequest where
   get = getWord8 >>= \case
-    87{-W-} -> Write <$> getInt64le
+    87{-W-} -> Write <$> get
     83{-S-} -> pure WriteSeqNo
     _ -> fail "Unknown tag"
-  put (Write ofs) = putWord8 87 >> putInt64le ofs
+  put (Write ofs) = putWord8 87 >> put ofs
   put WriteSeqNo = putWord8 83
