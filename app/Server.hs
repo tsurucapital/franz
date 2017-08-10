@@ -19,7 +19,7 @@ hostPort =
 
 withHostPort :: [String] -> (String -> Int -> [String] -> IO ()) -> IO ()
 withHostPort args k = case getOpt Permute hostPort args of
-  (opts, xs, []) -> let (h, p) = foldl (flip id) ("127.0.0.1", 6000) opts
+  (opts, xs, []) -> let (h, p) = foldl (flip id) ("127.0.0.1", 1886) opts
     in k h p $! xs
   (_, _, errs) -> ioError $ userError
     $ concat errs ++ usageInfo "Usage: lisztd [OPTION...] name" hostPort

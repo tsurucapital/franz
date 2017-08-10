@@ -13,7 +13,7 @@ import System.IO.Error (isEOFError)
 parseHostPort :: String -> (String -> Int -> r) -> r
 parseHostPort str k = case break (==':') str of
   (host, ':' : port) -> k host (read port)
-  (host, _) -> k host 6000
+  (host, _) -> k host 1886
 
 main :: IO ()
 main = getArgs >>= \case
