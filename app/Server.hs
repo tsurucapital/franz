@@ -39,13 +39,14 @@ main = getArgs >>= \args -> withOptions args $ \(Options host port dir) _ -> do
 
   runServer host port $ \pending -> do
     let req = pendingRequest pending
-    let (name, BS.drop 1 -> action) = BS.break (=='/') $ requestPath req
-
+    let (name', action) = BS.breakEnd (=='/') $ BS.drop 1 $ requestPath req
+    let name = BS.take (BS.length name' - 1) name' -- Remove trailing "/"
     m <- takeMVar vServers
     app <- case HM.lookup name m of
       Just app -> app <$ putMVar vServers m
       Nothing -> do
-        (_, app) <- openLisztServer (maybe "" addTrailingPathSeparator dir ++ BS.unpack name)
+        (_, app) <- openLisztServer
+          (maybe "" dropTrailingPathSeparator dir ++ BS.unpack name)
           `onException` putMVar vServers m
         putMVar vServers $! HM.insert name app m
         return app
