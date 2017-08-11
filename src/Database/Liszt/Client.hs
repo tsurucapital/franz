@@ -30,7 +30,7 @@ newtype Consumer = Consumer Connection
 
 -- | Acquire a consumer.
 withConsumer :: String -> Int -> String -> (Consumer -> IO a) -> IO a
-withConsumer host port name k = runClient host port (name ++ "/read") $ k . Consumer
+withConsumer host port name k = runClient host port ("/" ++ name ++ "/read") $ k . Consumer
 
 parsePayload :: MonadIO m => BL.ByteString -> m (Int64, B.ByteString)
 parsePayload bs = liftIO $ case runGetOrFail get bs of
@@ -67,7 +67,7 @@ newtype Producer = Producer Connection
 
 -- | Acquire a producer.
 withProducer :: String -> Int -> String -> (Producer -> IO a) -> IO a
-withProducer host port name k = runClient host port (name ++ "/write") $ k . Producer
+withProducer host port name k = runClient host port ("/" ++ name ++ "/write") $ k . Producer
 
 -- | Write a payload with the specified offset. If the offset is less than the
 -- last offset, it raises 'ConnectionException'.

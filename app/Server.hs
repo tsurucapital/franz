@@ -4,39 +4,49 @@ import Database.Liszt.Server
 import Network.WebSockets as WS
 import System.Console.GetOpt
 import System.Environment
+import System.FilePath
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.HashMap.Strict as HM
 import Control.Concurrent
 import Control.Exception
 
-hostPort :: [OptDescr ((String, Int) -> (String, Int))]
-hostPort =
+data Options = Options
+  { optHost :: String
+  , optPort :: Int
+  , optDir :: Maybe FilePath
+  }
+
+options :: [OptDescr (Options -> Options)]
+options  =
   [ Option ['p'] ["port"]
-      (ReqArg (\x (h, _) -> (h, read x)) "PORT") "port"
+      (ReqArg (\x o -> o { optPort = read x }) "PORT") "port"
   , Option ['h'] ["host"]
-      (ReqArg (\x (_, p) -> (x, p)) "HOST") "host"
+      (ReqArg (\x o -> o { optHost = x }) "HOST") "host"
+  , Option ['d'] ["dir"]
+      (ReqArg (\x o -> o { optDir = Just x }) "DIR") "directory"
   ]
 
-withHostPort :: [String] -> (String -> Int -> [String] -> IO ()) -> IO ()
-withHostPort args k = case getOpt Permute hostPort args of
-  (opts, xs, []) -> let (h, p) = foldl (flip id) ("127.0.0.1", 1886) opts
-    in k h p $! xs
+withOptions :: [String] -> (Options -> [String] -> IO ()) -> IO ()
+withOptions args k = case getOpt Permute options args of
+  (opts, xs, []) -> let o = foldl (flip id) (Options "127.0.0.1" 1886 Nothing) opts
+    in k o xs
   (_, _, errs) -> ioError $ userError
-    $ concat errs ++ usageInfo "Usage: lisztd [OPTION...] name" hostPort
+    $ concat errs ++ usageInfo "Usage: lisztd [OPTION...] name" options
 
 main :: IO ()
-main = getArgs >>= \args -> withHostPort args $ \host port _ -> do
+main = getArgs >>= \args -> withOptions args $ \(Options host port dir) _ -> do
   vServers <- newMVar HM.empty
 
   runServer host port $ \pending -> do
     let req = pendingRequest pending
-    let (name, BS.drop 1 -> action) = BS.break (=='/') $ requestPath req
-
+    let (name', action) = BS.breakEnd (=='/') $ BS.drop 1 $ requestPath req
+    let name = BS.take (BS.length name' - 1) name' -- Remove trailing "/"
     m <- takeMVar vServers
     app <- case HM.lookup name m of
       Just app -> app <$ putMVar vServers m
       Nothing -> do
-        (_, app) <- openLisztServer (BS.unpack name)
+        (_, app) <- openLisztServer
+          (maybe "" dropTrailingPathSeparator dir ++ BS.unpack name)
           `onException` putMVar vServers m
         putMVar vServers $! HM.insert name app m
         return app
