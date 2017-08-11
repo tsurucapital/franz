@@ -17,6 +17,7 @@ module Database.Liszt.Client (
 import Control.Exception
 import Control.Monad.IO.Class
 import Data.Binary
+import Data.Binary.Get
 import Data.Binary.Put
 import Data.Int
 import qualified Data.ByteString as B
@@ -31,19 +32,24 @@ newtype Consumer = Consumer Connection
 withConsumer :: String -> Int -> String -> (Consumer -> IO a) -> IO a
 withConsumer host port name k = runClient host port (name ++ "/read") $ k . Consumer
 
+parsePayload :: MonadIO m => BL.ByteString -> m (Int64, B.ByteString)
+parsePayload bs = liftIO $ case runGetOrFail get bs of
+  Right (content, _, ofs) -> return (ofs, BL.toStrict content)
+  Left _ -> throwIO $ ParseException "Malformed response"
+
 -- | Fetch a payload.
-readBlocking :: MonadIO m => Consumer -> m B.ByteString
+readBlocking :: MonadIO m => Consumer -> m (Int64, B.ByteString)
 readBlocking (Consumer conn) = liftIO $ do
   sendBinaryData conn $ encode Read
-  receiveData conn
+  receiveData conn >>= parsePayload
 
 -- | Fetch a payload. If it is at the end of the stream, return 'Nothing'.
-readNonBlocking :: MonadIO m => Consumer -> m (Maybe B.ByteString)
+readNonBlocking :: MonadIO m => Consumer -> m (Maybe (Int64, B.ByteString))
 readNonBlocking (Consumer conn) = liftIO $ do
   sendBinaryData conn $ encode $ NonBlocking Read
   receiveDataMessage conn >>= \case
     Text "EOF" -> return Nothing
-    Binary bs -> return $ Just $! BL.toStrict bs
+    Binary bs -> Just <$> parsePayload bs
     _ -> throwIO $ ParseException "Expecting EOF"
 
 -- | Seek to a specicied position.

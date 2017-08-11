@@ -18,12 +18,12 @@ parseHostPort str k = case break (==':') str of
 main :: IO ()
 main = getArgs >>= \case
   ["subscribe", hostPort, name] -> parseHostPort hostPort withConsumer name $ \conn -> forever $ do
-    bs <- readBlocking conn
+    bs <- snd <$> readBlocking conn
     B.hPut stdout bs
     putStrLn ""
   ["read", hostPort, name] -> parseHostPort hostPort withConsumer name $ \conn -> fix
     $ \self -> readNonBlocking conn >>= \case
-      Just bs -> do
+      Just (_, bs) -> do
         B.hPut stdout bs
         putStrLn ""
         self

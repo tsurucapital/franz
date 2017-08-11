@@ -43,7 +43,7 @@ acquire v m = do
 -- | Read the payload at the position in 'TVar', and update it by the next position.
 fetchPayload :: System
   -> TVar (M.Key, Int64)
-  -> STM (IO B.ByteString)
+  -> STM (IO (M.Key, B.ByteString))
 fetchPayload System{..} v = do
   (ofs, pos) <- readTVar v
   m <- readTVar vIndices
@@ -52,11 +52,12 @@ fetchPayload System{..} v = do
       writeTVar v op
       return $ acquire vAccess $ do
         hSeek theHandle AbsoluteSeek (fromIntegral pos)
-        B.hGet theHandle $ fromIntegral $ pos' - pos
+        bs <- B.hGet theHandle $ fromIntegral $ pos' - pos
+        return (ofs, bs)
     Nothing -> M.lookupGT ofs <$> readTVar vPayload >>= \case
       Just (ofs', (bs, pos')) -> do
         writeTVar v (ofs', pos')
-        return $ return bs
+        return $ return (ofs, bs)
       Nothing -> retry
 
 handleConsumer :: System -> WS.Connection -> IO ()
@@ -66,7 +67,8 @@ handleConsumer sys@System{..} conn = do
 
   let transaction (NonBlocking r) = transaction r
         <|> pure (WS.sendTextData conn ("EOF" :: BL.ByteString))
-      transaction Read = (>>=WS.sendBinaryData conn) <$> fetchPayload sys vOffset
+      transaction Read = (>>= \(i, bs) -> WS.sendBinaryData conn $ B.runPut $ B.put i >> B.putByteString bs )
+          <$> fetchPayload sys vOffset
       transaction Peek = WS.sendBinaryData conn . encode . fst
           <$> readTVar vOffset
       transaction (Seek ofs) = do
