@@ -1,5 +1,8 @@
 {-# LANGUAGE RecordWildCards, LambdaCase, OverloadedStrings, ViewPatterns, BangPatterns #-}
-module Database.Liszt.Server (openLisztServer) where
+module Database.Liszt.Server (System
+    , pushPayload
+    , MonotonicityViolation
+    , openLisztServer) where
 
 import Control.Applicative
 import Control.Concurrent
@@ -82,30 +85,43 @@ handleConsumer sys@System{..} conn = do
       Right (_, _, r) -> join $ atomically $ transaction r
       Left (_, _, e) -> WS.sendClose conn (fromString e :: B.ByteString)
 
+-- | The final offset.
+getLastOffset :: System -> STM (Maybe (M.Key, Int64))
+getLastOffset System{..} = readTVar vPayload >>= \m -> case M.maxViewWithKey m of
+  Just ((k, (_, p)), _) -> return $ Just (k, p)
+  Nothing -> fmap fst <$> M.maxViewWithKey <$> readTVar vIndices
+
+data MonotonicityViolation = MonotonicityViolation deriving Show
+instance Exception MonotonicityViolation
+
+-- | Push a payload.
+pushPayload :: System -> M.Key -> B.ByteString -> STM ()
+pushPayload sys@System{..} k content = do
+  p <- getLastOffset sys >>= \case
+    Just (k0, p)
+      | k > k0 -> return p
+      | otherwise -> throwSTM MonotonicityViolation
+    Nothing -> return 0
+
+  let !p' = p + fromIntegral (B.length content)
+  modifyTVar' vPayload (M.insert k (content, p'))
+
 handleProducer :: System -> WS.Connection -> IO ()
-handleProducer System{..} conn = forever $ do
+handleProducer sys@System{..} conn = forever $ do
   reqBS <- WS.receiveData conn
   case runGetOrFail get reqBS of
     Right (BL.toStrict -> !content, _, req) -> join $ atomically $ do
       m <- readTVar vPayload
 
-      maxOfs <- case M.maxViewWithKey m of
-        Just ((k, (_, p)), _) -> return $ Just (k, p)
-        Nothing -> fmap fst <$> M.maxViewWithKey <$> readTVar vIndices
-
-      let push o p = let !p' = p + fromIntegral (B.length content)
-            in return () <$ modifyTVar' vPayload (M.insert o (content, p'))
+      let push k p = return () <$ pushPayload sys k p
 
       case req of
-        Write o -> case maxOfs of
-          Just (k, p)
-            | k <= fromIntegral o -> push (fromIntegral o) p
-            | otherwise -> return
-                $ WS.sendClose conn ("Monotonicity violation" :: B.ByteString)
-          Nothing -> push (fromIntegral o) 0
-        WriteSeqNo -> case maxOfs of
-          Just (k, p) -> push (k + 1) p
-          Nothing -> push 0 0
+        Write k -> push (fromIntegral k) content
+          `catchSTM` \MonotonicityViolation -> return
+              (WS.sendClose conn ("Monotonicity violation" :: B.ByteString))
+        WriteSeqNo -> getLastOffset sys >>= \case
+          Just (k, _) -> push (k + 1) content
+          Nothing -> push 0 content
 
     Left _ -> WS.sendClose conn ("Malformed request" :: B.ByteString)
 
@@ -142,7 +158,7 @@ synchronise ipath System{..} = forever $ do
 --
 -- * @foo.payload@: All payloads concatenated as one file.
 --
-openLisztServer :: FilePath -> IO (ThreadId, WS.ServerApp)
+openLisztServer :: FilePath -> IO (System, ThreadId, WS.ServerApp)
 openLisztServer path = do
   let ipath = path ++ ".indices"
   let ppath = path ++ ".payload"
@@ -161,7 +177,7 @@ openLisztServer path = do
   tid <- forkIO $ forever $ synchronise ipath sys
     `catch` \e -> hPutStrLn stderr $ "synchronise: " ++ show (e :: IOException)
 
-  return (tid, \pending -> case WS.requestPath (WS.pendingRequest pending) of
+  return (sys, tid, \pending -> case WS.requestPath (WS.pendingRequest pending) of
     "read" -> WS.acceptRequest pending >>= handleConsumer sys
     "write" -> WS.acceptRequest pending >>= handleProducer sys
     p -> WS.rejectRequest pending ("Bad request: " <> p))
