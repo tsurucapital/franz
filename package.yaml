@@ -1,0 +1,54 @@
+name:                liszt
+version:             0.1.0.0
+github:              "fumieval/liszt"
+license:             BSD3
+author:              "Fumiaki Kinoshita"
+maintainer:          "fumiexcel@gmail.com"
+copyright:           "Copyright (c) 2017 Fumiaki Kinoshita"
+
+extra-source-files:
+- README.md
+- ChangeLog.md
+
+# Metadata used when publishing your package
+# synopsis:            Short description of your package
+# category:            Data
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description:         Please see the README on GitHub at <https://github.com/fumieval/liszt#readme>
+
+dependencies:
+- base >= 4.7 && < 5
+- network
+- bytestring
+- directory
+- filepath
+- hinotify
+- sendfile
+- transformers
+- binary
+- containers
+- unordered-containers
+- stm
+- stm-delay
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - Database.Liszt
+
+executables:
+  lisztd:
+    main: server.hs
+    source-dirs:         app
+    ghc-options:
+    - -threaded
+    dependencies:
+    - liszt
+  liszt:
+    main: client.hs
+    source-dirs: app
+    dependencies:
+    - liszt
