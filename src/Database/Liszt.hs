@@ -216,7 +216,7 @@ handleRequest inotify prefix vStreams conn = do
       SB.sendAll conn $ BL.toStrict $ encode $ length offsets
       forM_ offsets $ \(i, pos, pos') -> do
         let len = pos' - pos
-        SB.sendAll conn $ BL.toStrict $ encode len
+        SB.sendAll conn $ BL.toStrict $ encode (i, len)
         SF.sendFile' conn payloadPath (fromIntegral pos) (fromIntegral len)
 
 startServer :: Int -> FilePath -> IO ()
@@ -252,10 +252,10 @@ connect host port = do
   S.connect sock $ S.addrAddress addr
   return $ Connection sock
 
-fetch :: Connection -> Request -> IO [B.ByteString]
+fetch :: Connection -> Request -> IO [(Int, B.ByteString)]
 fetch (Connection sock) req = do
   SB.sendAll sock $ BL.toStrict $ encode req
-  go $ runGetIncremental $ get >>= \n -> replicateM n get
+  go $ runGetIncremental $ get >>= \n -> replicateM n ((,) <$> get <*> get)
   where
     go (Done _ _ a) = return a
     go (Partial cont) = do

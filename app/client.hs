@@ -62,11 +62,11 @@ main = getOpt Permute options <$> getArgs >>= \case
       let req = Request name' timeout'
       forM_ (reverse $ ranges o) $ \(i, j) -> do
         bss <- fetch conn $ req i j
-        mapM_ printBS bss
+        mapM_ (printBS . snd) bss
       forM_ (beginning o) $ \start -> flip fix start $ \self i -> do
         bss <- fetch conn $ req i i
-        mapM_ printBS bss
-        unless (null bss) $ self $ i + 1
+        mapM_ (printBS . snd) bss
+        unless (null bss) $ self $ fst (last bss) + 1
 
   (_, _, es) -> do
     name <- getProgName
