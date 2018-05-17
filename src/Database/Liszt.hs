@@ -106,7 +106,7 @@ write WriterHandle{..} ixs bs = mask $ \restore -> do
 
 data Request = Request
   { streamName :: !B.ByteString
-  , timeout :: !Int
+  , reqTimeout :: !Int
   , reqFrom :: !Int
   , reqTo :: !Int
   } deriving Generic
@@ -115,7 +115,7 @@ instance Binary Request
 defRequest :: B.ByteString -> Request
 defRequest name = Request
   { streamName = name
-  , timeout = maxBound `div` 2
+  , reqTimeout = maxBound `div` 2
   , reqFrom = 0
   , reqTo = 0
   }
@@ -131,13 +131,14 @@ createStream :: INotify -> FilePath -> IO Stream
 createStream inotify path = do
   let offsetPath = path </> "offsets"
   createDirectoryIfMissing False path
-  initialOffsets <- B.readFile offsetPath
-  vOffsets <- newTVarIO $ IM.fromList
-    $ zip [0..]
-    $ runGet (replicateM (B.length initialOffsets `div` 8) get)
-    $ BL.fromStrict initialOffsets
+  initialOffsetsBS <- B.readFile offsetPath
+  let initialOffsets = IM.fromList
+        $ zip [0..]
+        $ runGet (replicateM (B.length initialOffsetsBS `div` 8) get)
+        $ BL.fromStrict initialOffsetsBS
+  vOffsets <- newTVarIO initialOffsets
   vCaughtUp <- newTVarIO False
-  vCount <- newTVarIO 0
+  vCount <- newTVarIO $ IM.size initialOffsets
   watch <- addWatch inotify [Modify] offsetPath $ \case
     Modified _ _ -> atomically $ writeTVar vCaughtUp False
     _ -> return ()
@@ -162,9 +163,19 @@ range :: Int -> Int -> IM.IntMap Int
   -> ( Bool -- has final element
     , [(Int, Int, Int)] -- (seqno, begin, end)
     )
-range begin end allOffsets = (isJust lastItem || not (null cont)
+range begin_ end_ allOffsets = (isJust lastItem || not (null cont)
   , [(i, ofs, ofs') | (ofs, (i, ofs')) <- zip (firstOffset : map snd offsets) offsets])
   where
+    finalOffset = case IM.maxViewWithKey allOffsets of
+      Just ((k, _), _) -> k + 1
+      Nothing -> 0
+    begin
+      | begin_ < 0 = finalOffset + begin_
+      | otherwise = begin_
+    end
+      | end_ < 0 = finalOffset + end_
+      | otherwise = end_
+
     (wing, lastItem, cont) = IM.splitLookup end allOffsets
     (left, firstItem, body) = IM.splitLookup begin
       $ maybe id (IM.insert end) lastItem wing
