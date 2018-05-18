@@ -40,7 +40,7 @@ import Data.Proxy
 import GHC.Generics (Generic)
 import qualified Network.Socket as S
 import qualified Network.Socket.ByteString as SB
-import qualified Network.Socket.SendFile as SF
+import qualified Network.Socket.SendFile.Handle as SF
 import System.Directory
 import System.FilePath
 import System.IO
@@ -125,13 +125,16 @@ data Stream = Stream
   , vCount :: TVar Int
   , vCaughtUp :: TVar Bool
   , followThread :: ThreadId
+  , payloadHandle :: Handle
   }
 
 createStream :: INotify -> FilePath -> IO Stream
 createStream inotify path = do
   let offsetPath = path </> "offsets"
+  let payloadPath = path </> "payloads"
   createDirectoryIfMissing False path
   initialOffsetsBS <- B.readFile offsetPath
+  payloadHandle <- openBinaryFile payloadPath ReadMode
   let initialOffsets = IM.fromList
         $ zip [0..]
         $ runGet (replicateM (B.length initialOffsetsBS `div` 8) get)
@@ -195,7 +198,6 @@ handleRequest inotify prefix vStreams conn = do
     Right (_, _, a) -> return a
   streams <- atomically $ readTVar vStreams
   let path = prefix </> B.unpack name
-  let payloadPath = path </> "payloads"
   Stream{..} <- case HM.lookup name streams of
     Nothing -> do
       s <- createStream inotify path
@@ -217,7 +219,7 @@ handleRequest inotify prefix vStreams conn = do
       forM_ offsets $ \(i, pos, pos') -> do
         let len = pos' - pos
         SB.sendAll conn $ BL.toStrict $ encode (i, len)
-        SF.sendFile' conn payloadPath (fromIntegral pos) (fromIntegral len)
+        SF.sendFile' conn payloadHandle (fromIntegral pos) (fromIntegral len)
 
 startServer :: Int -> FilePath -> IO ()
 startServer port path = withINotify $ \inotify -> do
