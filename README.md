@@ -3,13 +3,7 @@
 ## start a server
 
 ```
-lisztd 11000 .
-```
-
-## writing
-
-```
-liszt write test < foo.txt
+lisztd .
 ```
 
 ## reading
@@ -17,5 +11,11 @@ liszt write test < foo.txt
 Read 0th to 9th elements
 
 ```
-liszt read localhost:11000 test 0 9
+liszt test -r 0:9
+```
+
+Follow a stream
+
+```
+liszt test -b _1
 ``
