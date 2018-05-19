@@ -38,17 +38,19 @@ library:
   source-dirs: src
   exposed-modules:
     - Database.Liszt
+    - Database.Liszt.Network
 
 executables:
   lisztd:
     main: server.hs
     source-dirs:         app
     ghc-options:
-    - -threaded
+    - -threaded -O2
     dependencies:
     - liszt
   liszt:
     main: client.hs
+    ghc-options: -O2
     source-dirs: app
     dependencies:
     - liszt

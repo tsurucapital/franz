@@ -7,16 +7,14 @@ module Database.Liszt (
     closeWriter,
     withWriter,
     write,
+    -- * Reader
     Request(..),
     defRequest,
-    -- * Server
-    startServer,
-    -- * Client
-    Connection,
-    withConnection,
-    connect,
-    fetch,
-    disconnect
+    LisztError(..),
+    LisztReader,
+    withLisztReader,
+    handleRequest,
+    fetchLocal,
     ) where
 
 import Control.Applicative
@@ -26,7 +24,6 @@ import Control.Concurrent.STM.Delay
 import Control.Exception
 import Control.Monad
 import Control.Monad.IO.Class
-import Control.Monad.Trans.Cont
 import Data.Binary
 import Data.Binary.Get
 import qualified Data.ByteString.Char8 as B
@@ -38,9 +35,6 @@ import qualified Data.IntMap.Strict as IM
 import Data.Maybe (isJust)
 import Data.Proxy
 import GHC.Generics (Generic)
-import qualified Network.Socket as S
-import qualified Network.Socket.ByteString as SB
-import qualified Network.Socket.SendFile.Handle as SF
 import System.Directory
 import System.FilePath
 import System.IO
@@ -167,7 +161,7 @@ range :: Int -> Int -> IM.IntMap Int
     , [(Int, Int, Int)] -- (seqno, begin, end)
     )
 range begin_ end_ allOffsets = (isJust lastItem || not (null cont)
-  , [(i, ofs, ofs') | (ofs, (i, ofs')) <- zip (firstOffset : map snd offsets) offsets])
+  , [(i, ofs, ofs' - ofs) | (ofs, (i, ofs')) <- zip (firstOffset : map snd offsets) offsets])
   where
     finalOffset = case IM.maxViewWithKey allOffsets of
       Just ((k, _), _) -> k + 1
@@ -190,12 +184,19 @@ data LisztError = MalformedRequest
 
 instance Exception LisztError
 
-handleRequest :: INotify -> FilePath -> TVar (HM.HashMap B.ByteString Stream) -> S.Socket -> IO ()
-handleRequest inotify prefix vStreams conn = do
-  msg <- BL.fromStrict <$> SB.recv conn 4096
-  Request name timeout begin end <- case decodeOrFail msg of
-    Left _ -> throwIO MalformedRequest
-    Right (_, _, a) -> return a
+data LisztReader = LisztReader
+  { inotify :: INotify
+  , vStreams :: TVar (HM.HashMap B.ByteString Stream)
+  , prefix :: FilePath
+  }
+
+withLisztReader :: FilePath -> (LisztReader -> IO ()) -> IO ()
+withLisztReader prefix k = do
+  vStreams <- newTVarIO HM.empty
+  withINotify $ \inotify -> k LisztReader{..}
+
+handleRequest :: LisztReader -> Request -> IO (Handle, [(Int, Int, Int)])
+handleRequest LisztReader{..} (Request name timeout begin end) = do
   streams <- atomically $ readTVar vStreams
   let path = prefix </> B.unpack name
   Stream{..} <- case HM.lookup name streams of
@@ -205,7 +206,7 @@ handleRequest inotify prefix vStreams conn = do
       return s
     Just vStream -> return vStream
   delay <- newDelay timeout
-  join $ atomically $ do
+  atomically $ do
     readTVar vCaughtUp >>= \b -> unless b retry
     allOffsets <- readTVar vOffsets
 
@@ -214,56 +215,11 @@ handleRequest inotify prefix vStreams conn = do
     timedout <- tryWaitDelay delay
     unless (timedout || ready) retry
 
-    return $ do
-      SB.sendAll conn $ BL.toStrict $ encode $ length offsets
-      forM_ offsets $ \(i, pos, pos') -> do
-        let len = pos' - pos
-        SB.sendAll conn $ BL.toStrict $ encode (i, len)
-        SF.sendFile' conn payloadHandle (fromIntegral pos) (fromIntegral len)
+    return (payloadHandle, offsets)
 
-startServer :: Int -> FilePath -> IO ()
-startServer port path = withINotify $ \inotify -> do
-  vStreams <- newTVarIO HM.empty
-  let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICHOST, S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
-  addr:_ <- S.getAddrInfo (Just hints) (Just "0.0.0.0") (Just $ show port)
-  bracket (S.socket (S.addrFamily addr) (S.addrSocketType addr) (S.addrProtocol addr)) S.close $ \sock -> do
-    S.setSocketOption sock S.ReuseAddr 1
-    S.bind sock $ S.SockAddrInet (fromIntegral port) (S.tupleToHostAddress (0,0,0,0))
-    S.listen sock 2
-    forever $ do
-      (conn, _) <- S.accept sock
-      forkFinally (forever $ handleRequest inotify path vStreams conn)
-        $ \e -> do
-          case e of
-            Left e -> case fromException e of
-              Just e -> SB.sendAll conn $ B.pack $ show (e :: LisztError)
-              Nothing -> return ()
-            Right _ -> return ()
-          S.close conn
-
-newtype Connection = Connection S.Socket
-
-withConnection :: String -> Int -> (Connection -> IO r) -> IO r
-withConnection host port = bracket (connect host port) disconnect
-
-connect :: String -> Int -> IO Connection
-connect host port = do
-  let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
-  addr:_ <- S.getAddrInfo (Just hints) (Just host) (Just $ show port)
-  sock <- S.socket (S.addrFamily addr) (S.addrSocketType addr) (S.addrProtocol addr)
-  S.connect sock $ S.addrAddress addr
-  return $ Connection sock
-
-fetch :: Connection -> Request -> IO [(Int, B.ByteString)]
-fetch (Connection sock) req = do
-  SB.sendAll sock $ BL.toStrict $ encode req
-  go $ runGetIncremental $ get >>= \n -> replicateM n ((,) <$> get <*> get)
-  where
-    go (Done _ _ a) = return a
-    go (Partial cont) = do
-      bs <- SB.recv sock 4096
-      if B.null bs then go $ cont Nothing else go $ cont $ Just bs
-    go (Fail _ _ str) = fail str
-
-disconnect :: Connection -> IO ()
-disconnect (Connection sock) = S.close sock
+fetchLocal :: LisztReader -> Request -> IO [(Int, B.ByteString)]
+fetchLocal env req = do
+  (h, offsets) <- handleRequest env req
+  forM offsets $ \(i, pos, len) -> do
+    hSeek h AbsoluteSeek $ fromIntegral pos
+    (,) i <$> B.hGet h len

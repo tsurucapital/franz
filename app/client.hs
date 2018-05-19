@@ -1,15 +1,13 @@
 {-# LANGUAGE LambdaCase, RecordWildCards #-}
 module Main where
 import Database.Liszt
+import Database.Liszt.Network
 
-import Control.Exception
 import Control.Monad
 import Data.Function (fix)
-import Data.Proxy
 import qualified Data.ByteString.Char8 as B
 import System.Environment
 import System.IO
-import System.IO.Error (isEOFError)
 import System.Console.GetOpt
 import System.Exit
 
@@ -53,6 +51,7 @@ printBS bs = do
   B.hPutStr stdout bs
   hFlush stdout
 
+main :: IO ()
 main = getOpt Permute options <$> getArgs >>= \case
   (fs, name : _, []) -> do
     let o = foldl (flip id) defaultOptions fs
