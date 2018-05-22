@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveGeneric, RecordWildCards, LambdaCase #-}
+{-# LANGUAGE DeriveGeneric, RecordWildCards, LambdaCase, Rank2Types, ScopedTypeVariables #-}
 module Database.Liszt (
     -- * Writer interface
     Naming(..),
@@ -28,6 +28,7 @@ import Data.Binary
 import Data.Binary.Get
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as BL
+import Data.Foldable (toList)
 import Data.Functor.Identity
 import qualified Data.HashMap.Strict as HM
 import Data.Int
@@ -58,7 +59,7 @@ data WriterHandle f = WriterHandle
   , vOffset :: MVar Int
   }
 
-openWriter :: Naming f => FilePath -> IO (WriterHandle f)
+openWriter :: forall f. Naming f => FilePath -> IO (WriterHandle f)
 openWriter path = do
   createDirectoryIfMissing False path
   let payloadPath = path </> "payloads"
@@ -68,11 +69,12 @@ openWriter path = do
   vOffset <- if alreadyExists
     then withFile payloadPath ReadMode hFileSize >>= newMVar . fromIntegral
     else newMVar 0
+  writeFile indexPath $ unlines $ toList (idents :: f String)
   hPayload <- openFile payloadPath AppendMode
   hOffset <- openFile offsetPath AppendMode
   liftIO $ hSetBuffering hOffset NoBuffering
   hIndices <- forM idents $ \s -> do
-    h <- openFile (indexPath ++ "." ++ s) AppendMode
+    h <- openFile (indexPath <.> s) AppendMode
     hSetBuffering h NoBuffering
     return h
   return WriterHandle{..}
@@ -92,14 +94,15 @@ write WriterHandle{..} ixs bs = mask $ \restore -> do
   let ofs' = ofs + B.length bs
   restore (do
     B.hPutStr hPayload bs
-    B.hPutStr hOffset $! BL.toStrict $ encode ofs'
     sequence_ $ liftA2 (\h -> B.hPutStr h . BL.toStrict . encode) hIndices ixs
+    B.hPutStr hOffset $! BL.toStrict $ encode ofs'
     hFlush hPayload
     ) `onException` putMVar vOffset ofs
   putMVar vOffset ofs'
 
 data Request = Request
   { streamName :: !B.ByteString
+  , reqIndex :: !(Maybe B.ByteString)
   , reqTimeout :: !Int
   , reqFrom :: !Int
   , reqTo :: !Int
@@ -109,6 +112,7 @@ instance Binary Request
 defRequest :: B.ByteString -> Request
 defRequest name = Request
   { streamName = name
+  , reqIndex = Nothing
   , reqTimeout = maxBound `div` 2
   , reqFrom = 0
   , reqTo = 0
@@ -116,6 +120,7 @@ defRequest name = Request
 
 data Stream = Stream
   { vOffsets :: TVar (IM.IntMap Int)
+  , indices :: HM.HashMap B.ByteString (TVar (IM.IntMap Int))
   , vCount :: TVar Int
   , vCaughtUp :: TVar Bool
   , followThread :: ThreadId
@@ -129,16 +134,28 @@ createStream inotify path = do
   createDirectoryIfMissing False path
   initialOffsetsBS <- B.readFile offsetPath
   payloadHandle <- openBinaryFile payloadPath ReadMode
-  let initialOffsets = IM.fromList
-        $ zip [0..]
-        $ runGet (replicateM (B.length initialOffsetsBS `div` 8) get)
-        $ BL.fromStrict initialOffsetsBS
+  let getInts = runGet (replicateM (B.length initialOffsetsBS `div` 8) get)
+        . BL.fromStrict
+  let initialOffsets = IM.fromList $ zip [0..] $ getInts initialOffsetsBS
   vOffsets <- newTVarIO initialOffsets
   vCaughtUp <- newTVarIO False
   vCount <- newTVarIO $ IM.size initialOffsets
   watch <- addWatch inotify [Modify] offsetPath $ \case
     Modified _ _ -> atomically $ writeTVar vCaughtUp False
     _ -> return ()
+
+  indexNames <- B.lines <$> B.readFile (path </> "indices")
+  (indices_, updateIndices) <- fmap unzip $ forM indexNames $ \name -> do
+    h <- openBinaryFile (path </> "indices" <.> B.unpack name) ReadMode
+    initial <- getInts <$> B.hGetContents h
+    var <- newTVarIO $ IM.fromList $ zip initial [0..]
+    return ((name, var), do
+      bs <- B.hGet h 8
+      let val = decode $ BL.fromStrict bs
+      return $ modifyTVar var . IM.insert val
+      )
+  let indices = HM.fromList indices_
+
   followThread <- forkFinally (withFile offsetPath ReadMode $ \h -> do
     hSeek h SeekFromEnd 0
     forever $ do
@@ -149,39 +166,35 @@ createStream inotify path = do
           atomically $ readTVar vCaughtUp >>= \b -> when b retry
         else do
           let ofs = decode $ BL.fromStrict bs
+          upd <- sequence updateIndices
           atomically $ do
             i <- readTVar vCount
             modifyTVar vOffsets $ IM.insert i ofs
+            mapM_ ($ i) upd
             writeTVar vCount $! i + 1)
     $ const $ removeWatch watch
+
   return Stream{..}
 
 range :: Int -> Int -> IM.IntMap Int
   -> ( Bool -- has final element
     , [(Int, Int, Int)] -- (seqno, begin, end)
     )
-range begin_ end_ allOffsets = (isJust lastItem || not (null cont)
+range begin end allOffsets = (isJust lastItem || not (null cont)
   , [(i, ofs, ofs' - ofs) | (ofs, (i, ofs')) <- zip (firstOffset : map snd offsets) offsets])
   where
-    finalOffset = case IM.maxViewWithKey allOffsets of
-      Just ((k, _), _) -> k + 1
-      Nothing -> 0
-    begin
-      | begin_ < 0 = finalOffset + begin_
-      | otherwise = begin_
-    end
-      | end_ < 0 = finalOffset + end_
-      | otherwise = end_
-
     (wing, lastItem, cont) = IM.splitLookup end allOffsets
-    (left, firstItem, body) = IM.splitLookup begin
-      $ maybe id (IM.insert end) lastItem wing
-    offsets = IM.toList $ maybe id (IM.insert begin) firstItem body
+    (left, body) = splitR begin $ maybe id (IM.insert end) lastItem wing
+    offsets = IM.toList body
     firstOffset = maybe 0 fst $ IM.maxView left
 
-data LisztError = MalformedRequest
-  | StreamNotFound deriving Show
+splitR :: Int -> IM.IntMap a -> (IM.IntMap a, IM.IntMap a)
+splitR i m = let (l, p, r) = IM.splitLookup i m in (l, maybe id (IM.insert i) p r)
 
+data LisztError = MalformedRequest
+  | StreamNotFound
+  | IndexNotFound
+  deriving Show
 instance Exception LisztError
 
 data LisztReader = LisztReader
@@ -196,7 +209,7 @@ withLisztReader prefix k = do
   withINotify $ \inotify -> k LisztReader{..}
 
 handleRequest :: LisztReader -> Request -> IO (Handle, [(Int, Int, Int)])
-handleRequest LisztReader{..} (Request name timeout begin end) = do
+handleRequest LisztReader{..} (Request name index_ timeout begin_ end_) = do
   streams <- atomically $ readTVar vStreams
   let path = prefix </> B.unpack name
   Stream{..} <- case HM.lookup name streams of
@@ -209,8 +222,26 @@ handleRequest LisztReader{..} (Request name timeout begin end) = do
   atomically $ do
     readTVar vCaughtUp >>= \b -> unless b retry
     allOffsets <- readTVar vOffsets
+    (ready, offsets) <- case index_ of
+      Nothing -> do
+        let finalOffset = case IM.maxViewWithKey allOffsets of
+              Just ((k, _), _) -> k + 1
+              Nothing -> 0
+        let f i
+              | i < 0 = finalOffset + i
+              | otherwise = i
+        pure $! range (f begin_) (f end_) allOffsets
+      Just index -> case HM.lookup index indices of
+        Nothing -> throwSTM IndexNotFound
+        Just v -> do
+          m <- readTVar v
+          let (_, wing) = splitR begin_ m
+          let (body, lastItem, _) = IM.splitLookup end_ wing
+          let body' = maybe id (IM.insert end_) lastItem body
+          case (IM.minView body', IM.maxView body') of
+            (Just (i, _), Just (j, _)) -> return $! range i j allOffsets
+            _ -> return (False, [])
 
-    let (ready, offsets) = range begin end allOffsets
     -- | If it timed out or has a matching element, continue
     timedout <- tryWaitDelay delay
     unless (timedout || ready) retry

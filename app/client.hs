@@ -19,6 +19,7 @@ parseHostPort str k = case break (==':') str of
 data Options = Options
   { host :: String
   , timeout :: Double
+  , index :: Maybe B.ByteString
   , ranges :: [(Int, Int)]
   , beginning :: Maybe Int
   }
@@ -35,6 +36,7 @@ options = [Option "h" ["host"] (ReqArg (\str o -> o { host = str }) "HOST:PORT")
       }) "FROM:TO") "ranges"
   , Option "b" ["begin"] (ReqArg (\str o -> o { beginning = Just $! readOffset str }) "pos") "get all the contents from this position"
   , Option "t" ["timeout"] (ReqArg (\str o -> o { timeout = read str }) "SECONDS") "Timeout"
+  , Option "i" ["index"] (ReqArg (\str o -> o { index = Just $ B.pack str }) "NAME") "Index name"
   ]
 
 defaultOptions :: Options
@@ -43,6 +45,7 @@ defaultOptions = Options
   , timeout = 1e12
   , ranges = []
   , beginning = Nothing
+  , index = Nothing
   }
 
 printBS :: B.ByteString -> IO ()
@@ -58,7 +61,7 @@ main = getOpt Permute options <$> getArgs >>= \case
     parseHostPort (host o) withConnection $ \conn -> do
       let name' = B.pack name
       let timeout' = floor $ timeout o * 1000000
-      let req = Request name' timeout'
+      let req = Request name' (index o) timeout'
       forM_ (reverse $ ranges o) $ \(i, j) -> do
         bss <- fetch conn $ req i j
         mapM_ (printBS . snd) bss
