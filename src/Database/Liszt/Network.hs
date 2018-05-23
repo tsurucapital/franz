@@ -14,6 +14,7 @@ import Data.Binary
 import Data.Binary.Get
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.HashMap.Strict as HM
 import qualified Network.Socket.SendFile.Handle as SF
 import qualified Network.Socket.ByteString as SB
 import qualified Network.Socket as S
@@ -25,8 +26,8 @@ respond env conn = do
     Left _ -> throwIO MalformedRequest
     Right (_, _, a) -> handleRequest env a
   SB.sendAll conn $ BL.toStrict $ encode $ length offsets
-  forM_ offsets $ \(i, pos, len) -> do
-    SB.sendAll conn $ BL.toStrict $ encode (i, len)
+  forM_ offsets $ \(i, xs, pos, len) -> do
+    SB.sendAll conn $ BL.toStrict $ encode (i, HM.toList xs, len)
     SF.sendFile' conn payloadHandle (fromIntegral pos) (fromIntegral len)
 
 startServer :: Int -> FilePath -> IO ()
@@ -64,10 +65,11 @@ connect host port = do
 disconnect :: Connection -> IO ()
 disconnect (Connection sock) = S.close sock
 
-fetch :: Connection -> Request -> IO [(Int, B.ByteString)]
+fetch :: Connection -> Request -> IO [(Int, IndexMap Int, B.ByteString)]
 fetch (Connection sock) req = do
   SB.sendAll sock $ BL.toStrict $ encode req
-  go $ runGetIncremental $ get >>= \n -> replicateM n ((,) <$> get <*> get)
+  go $ runGetIncremental $ get
+    >>= \n -> replicateM n ((,,) <$> get <*> fmap HM.fromList get <*> get)
   where
     go (Done _ _ a) = return a
     go (Partial cont) = do

@@ -10,6 +10,7 @@ module Database.Liszt (
     -- * Reader
     Request(..),
     defRequest,
+    IndexMap,
     LisztError(..),
     LisztReader,
     withLisztReader,
@@ -118,9 +119,12 @@ defRequest name = Request
   , reqTo = 0
   }
 
+type IndexMap = HM.HashMap B.ByteString
+
 data Stream = Stream
   { vOffsets :: TVar (IM.IntMap Int)
-  , indices :: HM.HashMap B.ByteString (TVar (IM.IntMap Int))
+  , reverseIndices :: IndexMap (TVar (IM.IntMap Int))
+  , indices :: IndexMap (TVar (IM.IntMap Int))
   , vCount :: TVar Int
   , vCaughtUp :: TVar Bool
   , followThread :: ThreadId
@@ -145,16 +149,20 @@ createStream inotify path = do
     _ -> return ()
 
   indexNames <- B.lines <$> B.readFile (path </> "indices")
-  (indices_, updateIndices) <- fmap unzip $ forM indexNames $ \name -> do
+  (indices_, reverseIndices_, updateIndices) <- fmap unzip3 $ forM indexNames $ \name -> do
     h <- openBinaryFile (path </> "indices" <.> B.unpack name) ReadMode
     initial <- getInts <$> B.hGetContents h
     var <- newTVarIO $ IM.fromList $ zip initial [0..]
-    return ((name, var), do
+    revVar <- newTVarIO $ IM.fromList $ zip [0..] initial
+    return ((name, var), (name, revVar), do
       bs <- B.hGet h 8
       let val = decode $ BL.fromStrict bs
-      return $ modifyTVar var . IM.insert val
+      return $ \i -> do
+        modifyTVar var $ IM.insert val i
+        modifyTVar var $ IM.insert i val
       )
   let indices = HM.fromList indices_
+  let reverseIndices = HM.fromList reverseIndices_
 
   followThread <- forkFinally (withFile offsetPath ReadMode $ \h -> do
     hSeek h SeekFromEnd 0
@@ -176,12 +184,16 @@ createStream inotify path = do
 
   return Stream{..}
 
-range :: Int -> Int -> IM.IntMap Int
+range :: Int -- from
+  -> Int -- to
+  -> IM.IntMap Int -- offsets
+  -> IndexMap (IM.IntMap Int) -- index snapshots
   -> ( Bool -- has final element
-    , [(Int, Int, Int)] -- (seqno, begin, end)
+    , [(Int, IndexMap Int, Int, Int)] -- (seqno, begin, end)
     )
-range begin end allOffsets = (isJust lastItem || not (null cont)
-  , [(i, ofs, ofs' - ofs) | (ofs, (i, ofs')) <- zip (firstOffset : map snd offsets) offsets])
+range begin end allOffsets snapshots = (isJust lastItem || not (null cont)
+  , [(i, HM.mapMaybe (IM.lookup i) snapshots, ofs, ofs' - ofs)
+    | (ofs, (i, ofs')) <- zip (firstOffset : map snd offsets) offsets])
   where
     (wing, lastItem, cont) = IM.splitLookup end allOffsets
     (left, body) = splitR begin $ maybe id (IM.insert end) lastItem wing
@@ -208,7 +220,9 @@ withLisztReader prefix k = do
   vStreams <- newTVarIO HM.empty
   withINotify $ \inotify -> k LisztReader{..}
 
-handleRequest :: LisztReader -> Request -> IO (Handle, [(Int, Int, Int)])
+handleRequest :: LisztReader
+  -> Request
+  -> IO (Handle, [(Int, IndexMap Int, Int, Int)])
 handleRequest LisztReader{..} (Request name index_ timeout begin_ end_) = do
   streams <- atomically $ readTVar vStreams
   let path = prefix </> B.unpack name
@@ -222,6 +236,7 @@ handleRequest LisztReader{..} (Request name index_ timeout begin_ end_) = do
   atomically $ do
     readTVar vCaughtUp >>= \b -> unless b retry
     allOffsets <- readTVar vOffsets
+    indexSnapshots <- traverse readTVar reverseIndices
     (ready, offsets) <- case index_ of
       Nothing -> do
         let finalOffset = case IM.maxViewWithKey allOffsets of
@@ -230,7 +245,7 @@ handleRequest LisztReader{..} (Request name index_ timeout begin_ end_) = do
         let f i
               | i < 0 = finalOffset + i
               | otherwise = i
-        pure $! range (f begin_) (f end_) allOffsets
+        pure $! range (f begin_) (f end_) allOffsets indexSnapshots
       Just index -> case HM.lookup index indices of
         Nothing -> throwSTM IndexNotFound
         Just v -> do
@@ -239,7 +254,7 @@ handleRequest LisztReader{..} (Request name index_ timeout begin_ end_) = do
           let (body, lastItem, _) = IM.splitLookup end_ wing
           let body' = maybe id (IM.insert end_) lastItem body
           case (IM.minView body', IM.maxView body') of
-            (Just (i, _), Just (j, _)) -> return $! range i j allOffsets
+            (Just (i, _), Just (j, _)) -> return $! range i j allOffsets indexSnapshots
             _ -> return (False, [])
 
     -- | If it timed out or has a matching element, continue
@@ -248,9 +263,9 @@ handleRequest LisztReader{..} (Request name index_ timeout begin_ end_) = do
 
     return (payloadHandle, offsets)
 
-fetchLocal :: LisztReader -> Request -> IO [(Int, B.ByteString)]
+fetchLocal :: LisztReader -> Request -> IO [(Int, IndexMap Int, B.ByteString)]
 fetchLocal env req = do
   (h, offsets) <- handleRequest env req
-  forM offsets $ \(i, pos, len) -> do
+  forM offsets $ \(i, xs, pos, len) -> do
     hSeek h AbsoluteSeek $ fromIntegral pos
-    (,) i <$> B.hGet h len
+    (,,) i xs <$> B.hGet h len

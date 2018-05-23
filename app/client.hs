@@ -48,8 +48,8 @@ defaultOptions = Options
   , index = Nothing
   }
 
-printBS :: B.ByteString -> IO ()
-printBS bs = do
+printBS :: (a, b, B.ByteString) -> IO ()
+printBS (_, _, bs) = do
   print $ B.length bs
   B.hPutStr stdout bs
   hFlush stdout
@@ -64,11 +64,11 @@ main = getOpt Permute options <$> getArgs >>= \case
       let req = Request name' (index o) timeout'
       forM_ (reverse $ ranges o) $ \(i, j) -> do
         bss <- fetch conn $ req i j
-        mapM_ (printBS . snd) bss
+        mapM_ printBS bss
       forM_ (beginning o) $ \start -> flip fix start $ \self i -> do
         bss <- fetch conn $ req i i
-        mapM_ (printBS . snd) bss
-        unless (null bss) $ self $ fst (last bss) + 1
+        mapM_ printBS bss
+        unless (null bss) $ self $ let (j, _, _) = last bss in j + 1
 
   (_, _, es) -> do
     name <- getProgName
