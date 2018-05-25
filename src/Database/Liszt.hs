@@ -107,7 +107,8 @@ instance Binary RequestType
 
 data Request = Request
   { streamName :: !B.ByteString
-  , reqIndex :: !(Maybe B.ByteString)
+  , reqFromIndex :: !(Maybe B.ByteString)
+  , reqToIndex :: !(Maybe B.ByteString)
   , reqTimeout :: !Int
   , reqType :: !RequestType
   , reqFrom :: !Int
@@ -118,7 +119,8 @@ instance Binary Request
 defRequest :: B.ByteString -> Request
 defRequest name = Request
   { streamName = name
-  , reqIndex = Nothing
+  , reqFromIndex = Nothing
+  , reqToIndex = Nothing
   , reqTimeout = maxBound `div` 2
   , reqFrom = 0
   , reqTo = 0
@@ -237,7 +239,7 @@ withLisztReader prefix k = do
 handleRequest :: LisztReader
   -> Request
   -> IO (Handle, [(Int, IndexMap Int, Int, Int)])
-handleRequest LisztReader{..} (Request name index_ timeout rt begin_ end_) = do
+handleRequest LisztReader{..} (Request name bindex_ eindex_ timeout rt begin_ end_) = do
   streams <- atomically $ readTVar vStreams
   let path = prefix </> B.unpack name
   Stream{..} <- case HM.lookup name streams of
@@ -251,25 +253,30 @@ handleRequest LisztReader{..} (Request name index_ timeout rt begin_ end_) = do
     readTVar vCaughtUp >>= \b -> unless b retry
     allOffsets <- readTVar vOffsets
     indexSnapshots <- traverse readTVar reverseIndices
-    (ready, offsets) <- case index_ of
-      Nothing -> do
-        let finalOffset = case IM.maxViewWithKey allOffsets of
-              Just ((k, _), _) -> k + 1
-              Nothing -> 0
-        let f i
-              | i < 0 = finalOffset + i
-              | otherwise = i
-        pure $! range (f begin_) (f end_) rt allOffsets indexSnapshots
+    let finalOffset = case IM.maxViewWithKey allOffsets of
+          Just ((k, _), _) -> k + 1
+          Nothing -> 0
+    let rotate i
+          | i < 0 = finalOffset + i
+          | otherwise = i
+    begin <- case bindex_ of
+      Nothing -> pure $ rotate begin_
       Just index -> case HM.lookup index indices of
         Nothing -> throwSTM IndexNotFound
         Just v -> do
           m <- readTVar v
           let (_, wing) = splitR begin_ m
-          let (body, lastItem, _) = IM.splitLookup end_ wing
+          return $! maybe maxBound fst $ IM.minView wing
+    end <- case eindex_ of
+      Nothing -> pure $ rotate end_
+      Just index -> case HM.lookup index indices of
+        Nothing -> throwSTM IndexNotFound
+        Just v -> do
+          m <- readTVar v
+          let (body, lastItem, _) = IM.splitLookup end_ m
           let body' = maybe id (IM.insert end_) lastItem body
-          case (IM.minView body', IM.maxView body') of
-            (Just (i, _), Just (j, _)) -> return $! range i j rt allOffsets indexSnapshots
-            _ -> return (False, [])
+          return $! maybe minBound fst $ IM.maxView body'
+    let (ready, offsets) = range begin end rt allOffsets indexSnapshots
 
     -- | If it timed out or has a matching element, continue
     timedout <- tryWaitDelay delay
