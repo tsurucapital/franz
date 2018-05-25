@@ -61,7 +61,7 @@ main = getOpt Permute options <$> getArgs >>= \case
     parseHostPort (host o) withConnection $ \conn -> do
       let name' = B.pack name
       let timeout' = floor $ timeout o * 1000000
-      let req = Request name' (index o) timeout'
+      let req = Request name' (index o) timeout' AllItems
       forM_ (reverse $ ranges o) $ \(i, j) -> do
         bss <- fetch conn $ req i j
         mapM_ printBS bss

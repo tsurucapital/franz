@@ -9,6 +9,7 @@ module Database.Liszt (
     write,
     -- * Reader
     Request(..),
+    RequestType(..),
     defRequest,
     IndexMap,
     LisztError(..),
@@ -101,10 +102,14 @@ write WriterHandle{..} ixs bs = mask $ \restore -> do
     ) `onException` putMVar vOffset ofs
   putMVar vOffset ofs'
 
+data RequestType = AllItems | LastItem deriving Generic
+instance Binary RequestType
+
 data Request = Request
   { streamName :: !B.ByteString
   , reqIndex :: !(Maybe B.ByteString)
   , reqTimeout :: !Int
+  , reqType :: !RequestType
   , reqFrom :: !Int
   , reqTo :: !Int
   } deriving Generic
@@ -117,6 +122,7 @@ defRequest name = Request
   , reqTimeout = maxBound `div` 2
   , reqFrom = 0
   , reqTo = 0
+  , reqType = AllItems
   }
 
 type IndexMap = HM.HashMap B.ByteString
@@ -186,19 +192,27 @@ createStream inotify path = do
 
 range :: Int -- from
   -> Int -- to
+  -> RequestType
   -> IM.IntMap Int -- offsets
   -> IndexMap (IM.IntMap Int) -- index snapshots
   -> ( Bool -- has final element
     , [(Int, IndexMap Int, Int, Int)] -- (seqno, begin, end)
     )
-range begin end allOffsets snapshots = (isJust lastItem || not (null cont)
+range begin end rt allOffsets snapshots = (isJust lastItem || not (null cont)
   , [(i, HM.mapMaybe (IM.lookup i) snapshots, ofs, ofs' - ofs)
-    | (ofs, (i, ofs')) <- zip (firstOffset : map snd offsets) offsets])
+    | (ofs, (i, ofs')) <- offsets])
   where
     (wing, lastItem, cont) = IM.splitLookup end allOffsets
     (left, body) = splitR begin $ maybe id (IM.insert end) lastItem wing
-    offsets = IM.toList body
-    firstOffset = maybe 0 fst $ IM.maxView left
+    offsets = case rt of
+      AllItems -> let xs = IM.toList body
+                      firstOffset = maybe 0 fst $ IM.maxView left
+          in zip (firstOffset : map snd xs) xs
+      LastItem -> case IM.maxViewWithKey body of
+        Nothing -> []
+        Just ((i, ofs'), r) -> case IM.maxView r of
+          Just (ofs, _) -> [(ofs, (i, ofs'))]
+
 
 splitR :: Int -> IM.IntMap a -> (IM.IntMap a, IM.IntMap a)
 splitR i m = let (l, p, r) = IM.splitLookup i m in (l, maybe id (IM.insert i) p r)
@@ -223,7 +237,7 @@ withLisztReader prefix k = do
 handleRequest :: LisztReader
   -> Request
   -> IO (Handle, [(Int, IndexMap Int, Int, Int)])
-handleRequest LisztReader{..} (Request name index_ timeout begin_ end_) = do
+handleRequest LisztReader{..} (Request name index_ timeout rt begin_ end_) = do
   streams <- atomically $ readTVar vStreams
   let path = prefix </> B.unpack name
   Stream{..} <- case HM.lookup name streams of
@@ -245,7 +259,7 @@ handleRequest LisztReader{..} (Request name index_ timeout begin_ end_) = do
         let f i
               | i < 0 = finalOffset + i
               | otherwise = i
-        pure $! range (f begin_) (f end_) allOffsets indexSnapshots
+        pure $! range (f begin_) (f end_) rt allOffsets indexSnapshots
       Just index -> case HM.lookup index indices of
         Nothing -> throwSTM IndexNotFound
         Just v -> do
@@ -254,7 +268,7 @@ handleRequest LisztReader{..} (Request name index_ timeout begin_ end_) = do
           let (body, lastItem, _) = IM.splitLookup end_ wing
           let body' = maybe id (IM.insert end_) lastItem body
           case (IM.minView body', IM.maxView body') of
-            (Just (i, _), Just (j, _)) -> return $! range i j allOffsets indexSnapshots
+            (Just (i, _), Just (j, _)) -> return $! range i j rt allOffsets indexSnapshots
             _ -> return (False, [])
 
     -- | If it timed out or has a matching element, continue
