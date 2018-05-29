@@ -146,8 +146,8 @@ createStream inotify path = do
   createDirectoryIfMissing False path
   initialOffsetsBS <- B.readFile offsetPath
   payloadHandle <- openBinaryFile payloadPath ReadMode
-  let getInts = runGet (replicateM (B.length initialOffsetsBS `div` 8) get)
-        . BL.fromStrict
+  let getInts bs = runGet (replicateM (B.length bs `div` 8) get)
+        $ BL.fromStrict bs
   let initialOffsets = IM.fromList $ zip [0..] $ getInts initialOffsetsBS
   vOffsets <- newTVarIO initialOffsets
   vCaughtUp <- newTVarIO False
