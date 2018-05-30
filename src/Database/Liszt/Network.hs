@@ -18,6 +18,7 @@ import qualified Data.HashMap.Strict as HM
 import qualified Network.Socket.SendFile.Handle as SF
 import qualified Network.Socket.ByteString as SB
 import qualified Network.Socket as S
+import System.IO
 
 respond :: LisztReader -> S.Socket -> IO ()
 respond env conn = do
@@ -45,7 +46,7 @@ startServer port path = withLisztReader path $ \env -> do
           case result of
             Left ex -> case fromException ex of
               Just e -> SB.sendAll conn $ B.pack $ show (e :: LisztError)
-              Nothing -> return ()
+              Nothing -> hPutStrLn stderr $ show ex
             Right _ -> return ()
           S.close conn
 
@@ -75,4 +76,4 @@ fetch (Connection sock) req = do
     go (Partial cont) = do
       bs <- SB.recv sock 4096
       if B.null bs then go $ cont Nothing else go $ cont $ Just bs
-    go (Fail _ _ str) = fail str
+    go (Fail _ _ str) = fail $ show req ++ ": " ++ str

@@ -102,7 +102,7 @@ write WriterHandle{..} ixs bs = mask $ \restore -> do
     ) `onException` putMVar vOffset ofs
   putMVar vOffset ofs'
 
-data RequestType = AllItems | LastItem deriving Generic
+data RequestType = AllItems | LastItem deriving (Show, Generic)
 instance Binary RequestType
 
 data Request = Request
@@ -113,7 +113,7 @@ data Request = Request
   , reqType :: !RequestType
   , reqFrom :: !Int
   , reqTo :: !Int
-  } deriving Generic
+  } deriving (Show, Generic)
 instance Binary Request
 
 defRequest :: B.ByteString -> Request
@@ -163,11 +163,11 @@ createStream inotify path = do
     var <- newTVarIO $ IM.fromList $ zip initial [0..]
     revVar <- newTVarIO $ IM.fromList $ zip [0..] initial
     return ((name, var), (name, revVar), do
-      bs <- B.hGet h 8
+      bs <- B.hGetNonBlocking h 8
       let val = decode $ BL.fromStrict bs
       return $ \i -> do
         modifyTVar var $ IM.insert val i
-        modifyTVar var $ IM.insert i val
+        modifyTVar revVar $ IM.insert i val
       )
   let indices = HM.fromList indices_
   let reverseIndices = HM.fromList reverseIndices_
@@ -175,7 +175,7 @@ createStream inotify path = do
   followThread <- forkFinally (withFile offsetPath ReadMode $ \h -> do
     hSeek h SeekFromEnd 0
     forever $ do
-      bs <- B.hGet h 8
+      bs <- B.hGetNonBlocking h 8
       if B.null bs
         then do
           atomically $ writeTVar vCaughtUp True
@@ -212,9 +212,9 @@ range begin end rt allOffsets snapshots = (isJust lastItem || not (null cont)
           in zip (firstOffset : map snd xs) xs
       LastItem -> case IM.maxViewWithKey body of
         Nothing -> []
-        Just ((i, ofs'), r) -> case IM.maxView r of
+        Just ((i, ofs'), r) -> case IM.maxView (IM.union left r) of
           Just (ofs, _) -> [(ofs, (i, ofs'))]
-
+          Nothing -> [(0, (i, ofs'))]
 
 splitR :: Int -> IM.IntMap a -> (IM.IntMap a, IM.IntMap a)
 splitR i m = let (l, p, r) = IM.splitLookup i m in (l, maybe id (IM.insert i) p r)

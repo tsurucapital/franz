@@ -36,6 +36,7 @@ dependencies:
 
 library:
   source-dirs: src
+  ghc-options: -Wall
   exposed-modules:
     - Database.Liszt
     - Database.Liszt.Network
@@ -45,12 +46,12 @@ executables:
     main: server.hs
     source-dirs:         app
     ghc-options:
-    - -threaded -O2
+    - -threaded -O2 -Wall
     dependencies:
     - liszt
   liszt:
     main: client.hs
-    ghc-options: -O2
+    ghc-options: -O2 -Wall
     source-dirs: app
     dependencies:
     - liszt
