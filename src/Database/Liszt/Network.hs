@@ -37,6 +37,7 @@ startServer port path = withLisztReader path $ \env -> do
   addr:_ <- S.getAddrInfo (Just hints) (Just "0.0.0.0") (Just $ show port)
   bracket (S.socket (S.addrFamily addr) (S.addrSocketType addr) (S.addrProtocol addr)) S.close $ \sock -> do
     S.setSocketOption sock S.ReuseAddr 1
+    S.setSocketOption sock S.NoDelay 1
     S.bind sock $ S.SockAddrInet (fromIntegral port) (S.tupleToHostAddress (0,0,0,0))
     S.listen sock 2
     forever $ do
