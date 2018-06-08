@@ -158,8 +158,10 @@ createStream inotify path = do
 
   indexNames <- B.lines <$> B.readFile (path </> "indices")
   (indices_, reverseIndices_, updateIndices) <- fmap unzip3 $ forM indexNames $ \name -> do
-    h <- openBinaryFile (path </> "indices" <.> B.unpack name) ReadMode
-    initial <- getInts <$> B.hGetContents h
+    let indexPath = path </> "indices" <.> B.unpack name
+    initial <- getInts <$> B.readFile indexPath
+    h <- openBinaryFile indexPath ReadMode
+    hSeek h SeekFromEnd 0
     var <- newTVarIO $ IM.fromList $ zip initial [0..]
     revVar <- newTVarIO $ IM.fromList $ zip [0..] initial
     return ((name, var), (name, revVar), do
@@ -175,7 +177,7 @@ createStream inotify path = do
   followThread <- forkFinally (withFile offsetPath ReadMode $ \h -> do
     hSeek h SeekFromEnd 0
     forever $ do
-      bs <- B.hGetNonBlocking h 8
+      bs <- B.hGetSome h 8
       if B.null bs
         then do
           atomically $ writeTVar vCaughtUp True
