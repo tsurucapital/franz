@@ -143,7 +143,8 @@ createStream :: INotify -> FilePath -> IO Stream
 createStream inotify path = do
   let offsetPath = path </> "offsets"
   let payloadPath = path </> "payloads"
-  createDirectoryIfMissing False path
+  exist <- doesDirectoryExist path
+  unless exist $ throwIO StreamNotFound
   initialOffsetsBS <- B.readFile offsetPath
   payloadHandle <- openBinaryFile payloadPath ReadMode
   let getInts bs = runGet (replicateM (B.length bs `div` 8) get)
@@ -190,7 +191,9 @@ createStream inotify path = do
             modifyTVar vOffsets $ IM.insert i ofs
             mapM_ ($ i) upd
             writeTVar vCount $! i + 1)
-    $ const $ removeWatch watch
+    $ \r -> do
+      removeWatch watch
+      either (hPutStrLn stderr . show) return r
 
   return Stream{..}
 
@@ -224,7 +227,8 @@ splitR i m = let (l, p, r) = IM.splitLookup i m in (l, maybe id (IM.insert i) p 
 data LisztError = MalformedRequest
   | StreamNotFound
   | IndexNotFound
-  deriving Show
+  deriving (Show, Generic)
+instance Binary LisztError
 instance Exception LisztError
 
 data LisztReader = LisztReader

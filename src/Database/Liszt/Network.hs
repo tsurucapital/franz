@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveGeneric, LambdaCase #-}
 module Database.Liszt.Network
   (startServer
   , Connection
@@ -15,10 +16,16 @@ import Data.Binary.Get
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Strict as HM
+import GHC.Generics (Generic)
 import qualified Network.Socket.SendFile.Handle as SF
 import qualified Network.Socket.ByteString as SB
 import qualified Network.Socket as S
 import System.IO
+
+data Response = ResponseSuccess !Int
+    | ResponseError !LisztError
+    deriving (Show, Generic)
+instance Binary Response
 
 respond :: LisztReader -> S.Socket -> IO ()
 respond env conn = do
@@ -26,7 +33,7 @@ respond env conn = do
   (payloadHandle, offsets) <- case decodeOrFail msg of
     Left _ -> throwIO MalformedRequest
     Right (_, _, a) -> handleRequest env a
-  SB.sendAll conn $ BL.toStrict $ encode $ length offsets
+  SB.sendAll conn $ BL.toStrict $ encode $ ResponseSuccess $ length offsets
   forM_ offsets $ \(i, xs, pos, len) -> do
     SB.sendAll conn $ BL.toStrict $ encode (i, HM.toList xs, len)
     SF.sendFile' conn payloadHandle (fromIntegral pos) (fromIntegral len)
@@ -46,7 +53,7 @@ startServer port path = withLisztReader path $ \env -> do
         $ \result -> do
           case result of
             Left ex -> case fromException ex of
-              Just e -> SB.sendAll conn $ B.pack $ show (e :: LisztError)
+              Just e -> SB.sendAll conn $ BL.toStrict $ encode $ ResponseError e
               Nothing -> hPutStrLn stderr $ show ex
             Right _ -> return ()
           S.close conn
@@ -70,10 +77,13 @@ disconnect (Connection sock) = S.close sock
 fetch :: Connection -> Request -> IO [(Int, IndexMap Int, B.ByteString)]
 fetch (Connection sock) req = do
   SB.sendAll sock $ BL.toStrict $ encode req
-  go $ runGetIncremental $ get
-    >>= \n -> replicateM n ((,,) <$> get <*> fmap HM.fromList get <*> get)
+  go $ runGetIncremental $ get >>= \case
+    ResponseSuccess n -> fmap Right $ replicateM n
+      $ (,,) <$> get <*> fmap HM.fromList get <*> get
+    ResponseError e -> return $ Left e
   where
-    go (Done _ _ a) = return a
+    go (Done _ _ (Right a)) = return a
+    go (Done _ _ (Left e)) = throwIO e
     go (Partial cont) = do
       bs <- SB.recv sock 4096
       if B.null bs then go $ cont Nothing else go $ cont $ Just bs
