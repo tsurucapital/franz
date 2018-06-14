@@ -63,7 +63,7 @@ data WriterHandle f = WriterHandle
 
 openWriter :: forall f. Naming f => FilePath -> IO (WriterHandle f)
 openWriter path = do
-  createDirectoryIfMissing False path
+  createDirectoryIfMissing True path
   let payloadPath = path </> "payloads"
   let offsetPath = path </> "offsets"
   let indexPath = path </> "indices"
