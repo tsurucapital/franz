@@ -41,7 +41,7 @@ import GHC.Generics (Generic)
 import System.Directory
 import System.FilePath
 import System.IO
-import System.INotify
+import System.FSNotify
 
 -- | Naming functor
 class (Applicative f, Traversable f) => Naming f where
@@ -139,8 +139,8 @@ data Stream = Stream
   , payloadHandle :: Handle
   }
 
-createStream :: INotify -> FilePath -> IO Stream
-createStream inotify path = do
+createStream :: WatchManager -> FilePath -> IO Stream
+createStream man path = do
   let offsetPath = path </> "offsets"
   let payloadPath = path </> "payloads"
   exist <- doesDirectoryExist path
@@ -153,9 +153,10 @@ createStream inotify path = do
   vOffsets <- newTVarIO initialOffsets
   vCaughtUp <- newTVarIO False
   vCount <- newTVarIO $ IM.size initialOffsets
-  watch <- addWatch inotify [Modify] offsetPath $ \case
-    Modified _ _ -> atomically $ writeTVar vCaughtUp False
-    _ -> return ()
+  watchDir man path (\case
+    Modified path _ | path == offsetPath -> True
+    _ -> False)
+    $ const $ atomically $ writeTVar vCaughtUp False
 
   indexNames <- B.lines <$> B.readFile (path </> "indices")
   (indices_, reverseIndices_, updateIndices) <- fmap unzip3 $ forM indexNames $ \name -> do
@@ -175,7 +176,7 @@ createStream inotify path = do
   let indices = HM.fromList indices_
   let reverseIndices = HM.fromList reverseIndices_
 
-  followThread <- forkFinally (withFile offsetPath ReadMode $ \h -> do
+  followThread <- forkIO $ withFile offsetPath ReadMode $ \h -> do
     hSeek h SeekFromEnd 0
     forever $ do
       bs <- B.hGetSome h 8
@@ -190,10 +191,7 @@ createStream inotify path = do
             i <- readTVar vCount
             modifyTVar vOffsets $ IM.insert i ofs
             mapM_ ($ i) upd
-            writeTVar vCount $! i + 1)
-    $ \r -> do
-      removeWatch watch
-      either (hPutStrLn stderr . show) return r
+            writeTVar vCount $! i + 1
 
   return Stream{..}
 
@@ -232,7 +230,7 @@ instance Binary LisztError
 instance Exception LisztError
 
 data LisztReader = LisztReader
-  { inotify :: INotify
+  { watchManager :: WatchManager
   , vStreams :: TVar (HM.HashMap B.ByteString Stream)
   , prefix :: FilePath
   }
@@ -240,7 +238,7 @@ data LisztReader = LisztReader
 withLisztReader :: FilePath -> (LisztReader -> IO ()) -> IO ()
 withLisztReader prefix k = do
   vStreams <- newTVarIO HM.empty
-  withINotify $ \inotify -> k LisztReader{..}
+  withManager $ \watchManager -> k LisztReader{..}
 
 handleRequest :: LisztReader
   -> Request
@@ -250,7 +248,7 @@ handleRequest LisztReader{..} (Request name bindex_ eindex_ timeout rt begin_ en
   let path = prefix </> B.unpack name
   Stream{..} <- case HM.lookup name streams of
     Nothing -> do
-      s <- createStream inotify path
+      s <- createStream watchManager path
       atomically $ modifyTVar vStreams $ HM.insert name s
       return s
     Just vStream -> return vStream

@@ -1,8 +1,8 @@
--- This file has been generated from package.yaml by hpack version 0.20.0.
+-- This file has been generated from package.yaml by hpack version 0.28.2.
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: b6e8324af4717264e0fcdb696582fe70fa7cced00b212a41a816d1e820312741
+-- hash: a563f41cf3a93034fdbc7a7bfac7ca538cb7bde10e480d65986091a2580f5bd3
 
 name:           liszt
 version:        0.1.0.0
@@ -16,7 +16,6 @@ license:        BSD3
 license-file:   LICENSE
 build-type:     Simple
 cabal-version:  >= 1.10
-
 extra-source-files:
     ChangeLog.md
     README.md
@@ -26,35 +25,35 @@ source-repository head
   location: https://github.com/fumieval/liszt
 
 library
-  hs-source-dirs:
-      src
-  ghc-options: -Wall
-  build-depends:
-      base >=4.7 && <5
-    , binary
-    , bytestring
-    , containers
-    , directory
-    , filepath
-    , hinotify
-    , network
-    , sendfile
-    , stm
-    , stm-delay
-    , transformers
-    , unordered-containers
   exposed-modules:
       Database.Liszt
       Database.Liszt.Network
   other-modules:
       Paths_liszt
+  hs-source-dirs:
+      src
+  build-depends:
+      base >=4.7 && <5
+    , binary
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , fsnotify
+    , network
+    , sendfile
+    , stm
+    , stm-delay
+    , transformers
+    , unordered-containers
   default-language: Haskell2010
 
 executable liszt
   main-is: client.hs
+  other-modules:
+      Paths_liszt
   hs-source-dirs:
       app
-  ghc-options: -O2 -Wall
   build-depends:
       base >=4.7 && <5
     , binary
@@ -62,7 +61,7 @@ executable liszt
     , containers
     , directory
     , filepath
-    , hinotify
+    , fsnotify
     , liszt
     , network
     , sendfile
@@ -70,15 +69,15 @@ executable liszt
     , stm-delay
     , transformers
     , unordered-containers
-  other-modules:
-      Paths_liszt
   default-language: Haskell2010
 
 executable lisztd
   main-is: server.hs
+  other-modules:
+      Paths_liszt
   hs-source-dirs:
       app
-  ghc-options: -threaded -O2 -Wall
+  ghc-options: -threaded
   build-depends:
       base >=4.7 && <5
     , binary
@@ -86,7 +85,7 @@ executable lisztd
     , containers
     , directory
     , filepath
-    , hinotify
+    , fsnotify
     , liszt
     , network
     , sendfile
@@ -94,6 +93,4 @@ executable lisztd
     , stm-delay
     , transformers
     , unordered-containers
-  other-modules:
-      Paths_liszt
   default-language: Haskell2010
