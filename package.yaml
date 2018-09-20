@@ -28,6 +28,7 @@ dependencies:
 - fsnotify
 - sendfile
 - transformers
+- winery
 - binary
 - containers
 - unordered-containers

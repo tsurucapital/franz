@@ -2,7 +2,7 @@
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: a563f41cf3a93034fdbc7a7bfac7ca538cb7bde10e480d65986091a2580f5bd3
+-- hash: 95d774df27373c9f13b349944ad587b2fe09f2164b619d66fcb09e42463ad622
 
 name:           liszt
 version:        0.1.0.0
@@ -46,6 +46,7 @@ library
     , stm-delay
     , transformers
     , unordered-containers
+    , winery
   default-language: Haskell2010
 
 executable liszt
@@ -69,6 +70,7 @@ executable liszt
     , stm-delay
     , transformers
     , unordered-containers
+    , winery
   default-language: Haskell2010
 
 executable lisztd
@@ -93,4 +95,5 @@ executable lisztd
     , stm-delay
     , transformers
     , unordered-containers
+    , winery
   default-language: Haskell2010

@@ -28,8 +28,10 @@ import Control.Monad
 import Control.Monad.IO.Class
 import Data.Binary
 import Data.Binary.Get
+import qualified Data.ByteString.Builder as BB
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.Winery as W
 import Data.Foldable (toList)
 import Data.Functor.Identity
 import qualified Data.HashMap.Strict as HM
@@ -58,7 +60,7 @@ data WriterHandle f = WriterHandle
   { hPayload :: Handle
   , hOffset :: Handle
   , hIndices :: f Handle
-  , vOffset :: MVar Int
+  , vOffset :: MVar Int64
   }
 
 openWriter :: forall f. Naming f => FilePath -> IO (WriterHandle f)
@@ -90,14 +92,14 @@ closeWriter WriterHandle{..} = do
 withWriter :: Naming f => FilePath -> (WriterHandle f -> IO ()) -> IO ()
 withWriter path = bracket (openWriter path) closeWriter
 
-write :: Naming f => WriterHandle f -> f Int64 -> B.ByteString -> IO ()
+write :: Naming f => WriterHandle f -> f Int64 -> W.Encoding -> IO ()
 write WriterHandle{..} ixs bs = mask $ \restore -> do
   ofs <- takeMVar vOffset
-  let ofs' = ofs + B.length bs
+  let ofs' = ofs + fromIntegral (W.getSize bs)
   restore (do
-    B.hPutStr hPayload bs
-    sequence_ $ liftA2 (\h -> B.hPutStr h . BL.toStrict . encode) hIndices ixs
-    B.hPutStr hOffset $! BL.toStrict $ encode ofs'
+    W.hPutEncoding hPayload bs
+    sequence_ $ liftA2 (\h -> BB.hPutBuilder h . BB.int64LE) hIndices ixs
+    BB.hPutBuilder hOffset $! BB.int64LE ofs'
     hFlush hPayload
     ) `onException` putMVar vOffset ofs
   putMVar vOffset ofs'
@@ -154,7 +156,7 @@ createStream man path = do
   vCaughtUp <- newTVarIO False
   vCount <- newTVarIO $ IM.size initialOffsets
   watchDir man path (\case
-    Modified path _ | path == offsetPath -> True
+    Modified path _ _ | path == offsetPath -> True
     _ -> False)
     $ const $ atomically $ writeTVar vCaughtUp False
 
