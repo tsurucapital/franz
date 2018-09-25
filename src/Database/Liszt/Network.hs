@@ -58,7 +58,7 @@ startServer port path = withLisztReader path $ \env -> do
             Right _ -> return ()
           S.close conn
 
-newtype Connection = Connection S.Socket
+newtype Connection = Connection (MVar S.Socket)
 
 withConnection :: String -> Int -> (Connection -> IO r) -> IO r
 withConnection host port = bracket (connect host port) disconnect
@@ -69,22 +69,21 @@ connect host port = do
   addr:_ <- S.getAddrInfo (Just hints) (Just host) (Just $ show port)
   sock <- S.socket (S.addrFamily addr) (S.addrSocketType addr) (S.addrProtocol addr)
   S.connect sock $ S.addrAddress addr
-  return $ Connection sock
+  Connection <$> newMVar sock
 
 disconnect :: Connection -> IO ()
-disconnect (Connection sock) = S.close sock
+disconnect (Connection sock) = takeMVar sock >>= S.close
 
 fetch :: Connection -> Request -> IO [(Int, IndexMap Int, B.ByteString)]
-fetch (Connection sock) req = do
+fetch (Connection vsock) req = modifyMVar vsock $ \sock -> do
   SB.sendAll sock $ BL.toStrict $ encode req
+  let go (Done _ _ (Right a)) = return (sock, a)
+      go (Done _ _ (Left e)) = throwIO e
+      go (Partial cont) = do
+        bs <- SB.recv sock 4096
+        if B.null bs then go $ cont Nothing else go $ cont $ Just bs
+      go (Fail _ _ str) = fail $ show req ++ ": " ++ str
   go $ runGetIncremental $ get >>= \case
     ResponseSuccess n -> fmap Right $ replicateM n
       $ (,,) <$> get <*> fmap HM.fromList get <*> get
     ResponseError e -> return $ Left e
-  where
-    go (Done _ _ (Right a)) = return a
-    go (Done _ _ (Left e)) = throwIO e
-    go (Partial cont) = do
-      bs <- SB.recv sock 4096
-      if B.null bs then go $ cont Nothing else go $ cont $ Just bs
-    go (Fail _ _ str) = fail $ show req ++ ": " ++ str
