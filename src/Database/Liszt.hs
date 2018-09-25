@@ -89,7 +89,7 @@ closeWriter WriterHandle{..} = do
   hClose hOffset
   mapM_ hClose hIndices
 
-withWriter :: Naming f => FilePath -> (WriterHandle f -> IO ()) -> IO ()
+withWriter :: Naming f => FilePath -> (WriterHandle f -> IO a) -> IO a
 withWriter path = bracket (openWriter path) closeWriter
 
 write :: Naming f => WriterHandle f -> f Int64 -> W.Encoding -> IO ()
@@ -98,8 +98,8 @@ write WriterHandle{..} ixs bs = mask $ \restore -> do
   let ofs' = ofs + fromIntegral (W.getSize bs)
   restore (do
     W.hPutEncoding hPayload bs
-    sequence_ $ liftA2 (\h -> BB.hPutBuilder h . BB.int64LE) hIndices ixs
-    BB.hPutBuilder hOffset $! BB.int64LE ofs'
+    sequence_ $ liftA2 (\h -> BB.hPutBuilder h . BB.int64BE) hIndices ixs
+    BB.hPutBuilder hOffset $! BB.int64BE ofs'
     hFlush hPayload
     ) `onException` putMVar vOffset ofs
   putMVar vOffset ofs'
