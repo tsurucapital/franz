@@ -26,6 +26,7 @@ dependencies:
 - directory
 - filepath
 - fsnotify
+- process
 - sendfile
 - transformers
 - winery

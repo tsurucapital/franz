@@ -1,7 +1,8 @@
-{-# LANGUAGE DeriveGeneric, LambdaCase #-}
+{-# LANGUAGE DeriveGeneric, LambdaCase, OverloadedStrings #-}
 module Database.Liszt.Network
   (startServer
   , Connection
+  , Directory(..)
   , withConnection
   , connect
   , disconnect
@@ -10,6 +11,7 @@ module Database.Liszt.Network
 import Control.Concurrent
 import Control.Exception
 import Control.Monad
+import Control.Concurrent.STM
 import Database.Liszt
 import Data.Binary
 import Data.Binary.Get
@@ -20,7 +22,10 @@ import GHC.Generics (Generic)
 import qualified Network.Socket.SendFile.Handle as SF
 import qualified Network.Socket.ByteString as SB
 import qualified Network.Socket as S
+import System.Directory
+import System.FilePath
 import System.IO
+import System.Process
 
 data Response = ResponseSuccess !Int
     | ResponseError !LisztError
@@ -39,7 +44,8 @@ respond env conn = do
     SF.sendFile' conn payloadHandle (fromIntegral pos) (fromIntegral len)
 
 startServer :: Int -> FilePath -> IO ()
-startServer port path = withLisztReader path $ \env -> do
+startServer port prefix = withLisztReader prefix $ \env -> do
+  vMountCount <- newTVarIO HM.empty
   let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICHOST, S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
   addr:_ <- S.getAddrInfo (Just hints) (Just "0.0.0.0") (Just $ show port)
   bracket (S.socket (S.addrFamily addr) (S.addrSocketType addr) (S.addrProtocol addr)) S.close $ \sock -> do
@@ -49,7 +55,27 @@ startServer port path = withLisztReader path $ \env -> do
     S.listen sock 2
     forever $ do
       (conn, _) <- S.accept sock
-      forkFinally (forever $ respond env conn)
+      forkFinally (do
+        decode <$> BL.fromStrict <$> SB.recv conn 4096 >>= \case
+          Live -> forever $ respond env conn
+          Archive path -> do
+            atomically $ modifyTVar vMountCount (HM.insertWith (+) path 1)
+            let dest = prefix </> dropExtension path
+            createDirectoryIfMissing True dest
+            callProcess "squashfuse" [prefix </> path, dest]
+            forever (respond env conn)
+              `finally` do
+                join $ atomically $ do
+                  m <- readTVar vMountCount
+                  case HM.lookup path m of
+                    Just 1 -> do
+                      writeTVar vMountCount $ HM.delete path m
+                      return $ callProcess "fusermount" ["-u", dest]
+                    Just n -> do
+                      writeTVar vMountCount $ HM.insert path (n - 1) m
+                      pure mempty
+                    Nothing -> pure mempty
+        )
         $ \result -> do
           case result of
             Left ex -> case fromException ex of
@@ -60,16 +86,23 @@ startServer port path = withLisztReader path $ \env -> do
 
 newtype Connection = Connection (MVar S.Socket)
 
-withConnection :: String -> Int -> (Connection -> IO r) -> IO r
-withConnection host port = bracket (connect host port) disconnect
+withConnection :: String -> Int -> Directory -> (Connection -> IO r) -> IO r
+withConnection host port dir = bracket (connect host port dir) disconnect
 
-connect :: String -> Int -> IO Connection
-connect host port = do
+data Directory = Live | Archive !FilePath deriving Generic
+instance Binary Directory
+
+connect :: String -> Int -> Directory -> IO Connection
+connect host port dir = do
   let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
   addr:_ <- S.getAddrInfo (Just hints) (Just host) (Just $ show port)
   sock <- S.socket (S.addrFamily addr) (S.addrSocketType addr) (S.addrProtocol addr)
   S.connect sock $ S.addrAddress addr
-  Connection <$> newMVar sock
+  SB.sendAll sock $ BL.toStrict $ encode dir
+  resp <- SB.recv sock 4096
+  case resp of
+    "READY" -> Connection <$> newMVar sock
+    e -> fail $ "connect: Unexpected response: " ++ show e
 
 disconnect :: Connection -> IO ()
 disconnect (Connection sock) = takeMVar sock >>= S.close

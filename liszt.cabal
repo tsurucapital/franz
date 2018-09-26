@@ -2,7 +2,7 @@
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 95d774df27373c9f13b349944ad587b2fe09f2164b619d66fcb09e42463ad622
+-- hash: c4ac9b3b1e68e2a12377d7685bc54ba0ce45b4cb90f700a3237ee15d079b8a00
 
 name:           liszt
 version:        0.1.0.0
@@ -41,6 +41,7 @@ library
     , filepath
     , fsnotify
     , network
+    , process
     , sendfile
     , stm
     , stm-delay
@@ -65,6 +66,7 @@ executable liszt
     , fsnotify
     , liszt
     , network
+    , process
     , sendfile
     , stm
     , stm-delay
@@ -90,6 +92,7 @@ executable lisztd
     , fsnotify
     , liszt
     , network
+    , process
     , sendfile
     , stm
     , stm-delay

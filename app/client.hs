@@ -61,7 +61,7 @@ main :: IO ()
 main = getOpt Permute options <$> getArgs >>= \case
   (fs, name : _, []) -> do
     let o = foldl (flip id) defaultOptions fs
-    parseHostPort (host o) withConnection $ \conn -> do
+    parseHostPort (host o) withConnection Live $ \conn -> do
       let name' = B.pack name
       let timeout' = floor $ timeout o * 1000000
       let req = Request name' (index o) (index o) timeout' AllItems
