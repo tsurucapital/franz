@@ -22,10 +22,10 @@ main :: IO ()
 main = getOpt Permute options <$> getArgs >>= \case
   (fs, args, []) -> do
     let o = foldl (flip id) defaultOptions fs
-    startServer (port o) $ case args of
-      path : _ -> path
-      [] -> "."
+    case args of
+      path : apath : _ -> startServer (port o) path (Just apath)
+      path : _ -> startServer (port o) path Nothing
+      [] -> startServer (port o) "." Nothing
   (_, _, es) -> do
     name <- getProgName
     die $ unlines es ++ usageInfo name options
-

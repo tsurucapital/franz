@@ -43,8 +43,11 @@ respond env conn = do
     SB.sendAll conn $ BL.toStrict $ encode (i, HM.toList xs, len)
     SF.sendFile' conn payloadHandle (fromIntegral pos) (fromIntegral len)
 
-startServer :: Int -> FilePath -> IO ()
-startServer port prefix = withLisztReader prefix $ \env -> do
+startServer :: Int
+    -> FilePath -- live prefix
+    -> Maybe FilePath -- archive prefix
+    -> IO ()
+startServer port prefix aprefix = withLisztReader prefix $ \env -> do
   vMountCount <- newTVarIO HM.empty
   let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICHOST, S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
   addr:_ <- S.getAddrInfo (Just hints) (Just "0.0.0.0") (Just $ show port)
@@ -58,11 +61,19 @@ startServer port prefix = withLisztReader prefix $ \env -> do
       forkFinally (do
         decode <$> BL.fromStrict <$> SB.recv conn 4096 >>= \case
           Live -> forever $ respond env conn
-          Archive path -> do
-            atomically $ modifyTVar vMountCount (HM.insertWith (+) path 1)
-            let dest = prefix </> dropExtension path
-            createDirectoryIfMissing True dest
-            callProcess "squashfuse" [prefix </> path, dest]
+          Archive path | Just apath <- aprefix -> do
+            let dest = prefix </> path
+            join $ atomically $ do
+              m <- readTVar vMountCount
+              case HM.lookup path m of
+                Nothing -> do
+                  writeTVar vMountCount $ HM.insert path 1 m
+                  return $ do
+                    b <- doesFileExist (apath </> path)
+                    when b $ do
+                      createDirectoryIfMissing True dest
+                      callProcess "squashfuse" [apath </> path, dest]
+                Just n -> fmap pure $ writeTVar vMountCount $ HM.insert path (n + 1) m
             forever (respond env conn)
               `finally` do
                 join $ atomically $ do
@@ -73,8 +84,9 @@ startServer port prefix = withLisztReader prefix $ \env -> do
                       return $ callProcess "fusermount" ["-u", dest]
                     Just n -> do
                       writeTVar vMountCount $ HM.insert path (n - 1) m
-                      pure mempty
-                    Nothing -> pure mempty
+                      pure (pure ())
+                    Nothing -> pure (pure ())
+          _ -> throwIO ArchiveDisabled
         )
         $ \result -> do
           case result of

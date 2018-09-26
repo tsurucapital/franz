@@ -227,6 +227,7 @@ splitR i m = let (l, p, r) = IM.splitLookup i m in (l, maybe id (IM.insert i) p 
 data LisztError = MalformedRequest
   | StreamNotFound
   | IndexNotFound
+  | ArchiveDisabled
   deriving (Show, Generic)
 instance Binary LisztError
 instance Exception LisztError
