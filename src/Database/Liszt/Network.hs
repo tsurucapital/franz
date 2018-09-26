@@ -62,17 +62,18 @@ startServer port prefix aprefix = withLisztReader prefix $ \env -> do
         decode <$> BL.fromStrict <$> SB.recv conn 4096 >>= \case
           Live -> forever $ respond env conn
           Archive path | Just apath <- aprefix -> do
-            let dest = prefix </> path
+            let src = apath </> B.unpack path
+            let dest = prefix </> B.unpack path
             join $ atomically $ do
               m <- readTVar vMountCount
               case HM.lookup path m of
                 Nothing -> do
                   writeTVar vMountCount $ HM.insert path 1 m
                   return $ do
-                    b <- doesFileExist (apath </> path)
+                    b <- doesFileExist src
                     when b $ do
                       createDirectoryIfMissing True dest
-                      callProcess "squashfuse" [apath </> path, dest]
+                      callProcess "squashfuse" [src, dest]
                 Just n -> fmap pure $ writeTVar vMountCount $ HM.insert path (n + 1) m
             forever (respond env conn)
               `finally` do
@@ -101,7 +102,7 @@ newtype Connection = Connection (MVar S.Socket)
 withConnection :: String -> Int -> Directory -> (Connection -> IO r) -> IO r
 withConnection host port dir = bracket (connect host port dir) disconnect
 
-data Directory = Live | Archive !FilePath deriving Generic
+data Directory = Live | Archive !B.ByteString deriving Generic
 instance Binary Directory
 
 connect :: String -> Int -> Directory -> IO Connection
