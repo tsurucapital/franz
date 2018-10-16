@@ -1,5 +1,5 @@
 {-# LANGUAGE DeriveGeneric, LambdaCase, OverloadedStrings #-}
-module Database.Liszt.Network
+module Database.Franz.Network
   (startServer
   , Connection
   , Directory(..)
@@ -12,9 +12,9 @@ import Control.Concurrent
 import Control.Exception
 import Control.Monad
 import Control.Concurrent.STM
-import Database.Liszt
-import Data.Binary
-import Data.Binary.Get
+import Database.Franz
+import Data.Serialize
+import Data.Serialize.Get
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Strict as HM
@@ -28,26 +28,26 @@ import System.IO
 import System.Process
 
 data Response = ResponseSuccess !Int
-    | ResponseError !LisztError
+    | ResponseError !FranzError
     deriving (Show, Generic)
-instance Binary Response
+instance Serialize Response
 
-respond :: LisztReader -> S.Socket -> IO ()
+respond :: FranzReader -> S.Socket -> IO ()
 respond env conn = do
-  msg <- BL.fromStrict <$> SB.recv conn 4096
-  (payloadHandle, offsets) <- case decodeOrFail msg of
+  msg <- SB.recv conn 4096
+  (payloadHandle, offsets) <- case decode msg of
     Left _ -> throwIO MalformedRequest
-    Right (_, _, a) -> handleRequest env a
-  SB.sendAll conn $ BL.toStrict $ encode $ ResponseSuccess $ length offsets
+    Right a -> handleRequest env a
+  SB.sendAll conn $ encode $ ResponseSuccess $ length offsets
   forM_ offsets $ \(i, xs, pos, len) -> do
-    SB.sendAll conn $ BL.toStrict $ encode (i, HM.toList xs, len)
+    SB.sendAll conn $ encode (i, HM.toList xs, len)
     SF.sendFile' conn payloadHandle (fromIntegral pos) (fromIntegral len)
 
 startServer :: Int
     -> FilePath -- live prefix
     -> Maybe FilePath -- archive prefix
     -> IO ()
-startServer port prefix aprefix = withLisztReader prefix $ \env -> do
+startServer port prefix aprefix = withFranzReader prefix $ \env -> do
   vMountCount <- newTVarIO HM.empty
   let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICHOST, S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
   addr:_ <- S.getAddrInfo (Just hints) (Just "0.0.0.0") (Just $ show port)
@@ -59,9 +59,12 @@ startServer port prefix aprefix = withLisztReader prefix $ \env -> do
     forever $ do
       (conn, _) <- S.accept sock
       forkFinally (do
-        decode <$> BL.fromStrict <$> SB.recv conn 4096 >>= \case
-          Live -> forever $ respond env conn
-          Archive path | Just apath <- aprefix -> do
+        decode <$> SB.recv conn 4096 >>= \case
+          Left _ -> throwIO MalformedRequest
+          Right Live -> do
+            SB.sendAll conn "READY"
+            forever $ respond env conn
+          Right (Archive path) | Just apath <- aprefix -> do
             let src = apath </> B.unpack path
             let dest = prefix </> B.unpack path
             join $ atomically $ do
@@ -75,6 +78,7 @@ startServer port prefix aprefix = withLisztReader prefix $ \env -> do
                       createDirectoryIfMissing True dest
                       callProcess "squashfuse" [src, dest]
                 Just n -> fmap pure $ writeTVar vMountCount $ HM.insert path (n + 1) m
+            SB.sendAll conn "READY"
             forever (respond env conn)
               `finally` do
                 join $ atomically $ do
@@ -92,7 +96,7 @@ startServer port prefix aprefix = withLisztReader prefix $ \env -> do
         $ \result -> do
           case result of
             Left ex -> case fromException ex of
-              Just e -> SB.sendAll conn $ BL.toStrict $ encode $ ResponseError e
+              Just e -> SB.sendAll conn $ encode $ ResponseError e
               Nothing -> hPutStrLn stderr $ show ex
             Right _ -> return ()
           S.close conn
@@ -102,8 +106,8 @@ newtype Connection = Connection (MVar S.Socket)
 withConnection :: String -> Int -> Directory -> (Connection -> IO r) -> IO r
 withConnection host port dir = bracket (connect host port dir) disconnect
 
-data Directory = Live | Archive !B.ByteString deriving Generic
-instance Binary Directory
+data Directory = Live | Archive !B.ByteString deriving (Show, Generic)
+instance Serialize Directory
 
 connect :: String -> Int -> Directory -> IO Connection
 connect host port dir = do
@@ -111,7 +115,7 @@ connect host port dir = do
   addr:_ <- S.getAddrInfo (Just hints) (Just host) (Just $ show port)
   sock <- S.socket (S.addrFamily addr) (S.addrSocketType addr) (S.addrProtocol addr)
   S.connect sock $ S.addrAddress addr
-  SB.sendAll sock $ BL.toStrict $ encode dir
+  SB.sendAll sock $ encode dir
   resp <- SB.recv sock 4096
   case resp of
     "READY" -> Connection <$> newMVar sock
@@ -122,14 +126,15 @@ disconnect (Connection sock) = takeMVar sock >>= S.close
 
 fetch :: Connection -> Request -> IO [(Int, IndexMap Int, B.ByteString)]
 fetch (Connection vsock) req = modifyMVar vsock $ \sock -> do
-  SB.sendAll sock $ BL.toStrict $ encode req
-  let go (Done _ _ (Right a)) = return (sock, a)
-      go (Done _ _ (Left e)) = throwIO e
+  SB.sendAll sock $ encode req
+  let go (Done (Right a) _) = return (sock, a)
+      go (Done (Left e) _) = throwIO e
       go (Partial cont) = do
         bs <- SB.recv sock 4096
-        if B.null bs then go $ cont Nothing else go $ cont $ Just bs
-      go (Fail _ _ str) = fail $ show req ++ ": " ++ str
-  go $ runGetIncremental $ get >>= \case
+        if B.null bs then go $ cont "" else go $ cont bs
+      go (Fail str _) = fail $ show req ++ ": " ++ str
+  bs <- SB.recv sock 4096
+  go $ flip runGetPartial bs $ get >>= \case
     ResponseSuccess n -> fmap Right $ replicateM n
       $ (,,) <$> get <*> fmap HM.fromList get <*> get
     ResponseError e -> return $ Left e

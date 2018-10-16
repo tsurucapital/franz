@@ -1,3 +1,3 @@
-# Changelog for itodenwa
+# Changelog for franz
 
 ## Unreleased changes

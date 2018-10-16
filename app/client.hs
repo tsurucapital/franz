@@ -1,7 +1,7 @@
 {-# LANGUAGE LambdaCase, RecordWildCards #-}
 module Main where
-import Database.Liszt
-import Database.Liszt.Network
+import Database.Franz
+import Database.Franz.Network
 
 import Control.Monad
 import Data.Function (fix)
@@ -38,7 +38,7 @@ options = [Option "h" ["host"] (ReqArg (\str o -> o { host = str }) "HOST:PORT")
   , Option "b" ["begin"] (ReqArg (\str o -> o { beginning = Just $! readOffset str }) "pos") "get all the contents from this position"
   , Option "t" ["timeout"] (ReqArg (\str o -> o { timeout = read str }) "SECONDS") "Timeout"
   , Option "i" ["index"] (ReqArg (\str o -> o { index = Just $ B.pack str }) "NAME") "Index name"
-  , Option "" ["--prefix-length"] (NoArg (\o -> o { prefixLength = True })) "Prefix payloads by their lengths"
+  , Option "" ["prefix-length"] (NoArg (\o -> o { prefixLength = True })) "Prefix payloads by their lengths"
   ]
 
 defaultOptions :: Options

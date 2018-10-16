@@ -1,9 +1,9 @@
-# Liszt
+# Franz
 
 ## start a server
 
 ```
-lisztd .
+franzd .
 ```
 
 ## reading
@@ -11,11 +11,11 @@ lisztd .
 Read 0th to 9th elements
 
 ```
-liszt test -r 0:9
+franz test -r 0:9
 ```
 
 Follow a stream
 
 ```
-liszt test -b _1
+franz test -b _1
 ``

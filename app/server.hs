@@ -1,7 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 module Main where
 
-import Database.Liszt.Network
+import Database.Franz.Network
 import System.Environment
 import System.Console.GetOpt
 import System.Exit

@@ -1,5 +1,5 @@
 {-# LANGUAGE DeriveGeneric, RecordWildCards, LambdaCase, Rank2Types, ScopedTypeVariables #-}
-module Database.Liszt (
+module Database.Franz (
     -- * Writer interface
     Naming(..),
     WriterHandle,
@@ -12,9 +12,9 @@ module Database.Liszt (
     RequestType(..),
     defRequest,
     IndexMap,
-    LisztError(..),
-    LisztReader,
-    withLisztReader,
+    FranzError(..),
+    FranzReader,
+    withFranzReader,
     handleRequest,
     fetchLocal,
     ) where
@@ -26,12 +26,11 @@ import Control.Concurrent.STM.Delay
 import Control.Exception
 import Control.Monad
 import Control.Monad.IO.Class
-import Data.Binary
-import Data.Binary.Get
+import Data.Serialize
+import Data.Serialize.Get
 import qualified Data.ByteString.Builder as BB
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as BL
-import qualified Data.Winery as W
 import Data.Foldable (toList)
 import Data.Functor.Identity
 import qualified Data.HashMap.Strict as HM
@@ -92,12 +91,12 @@ closeWriter WriterHandle{..} = do
 withWriter :: Naming f => FilePath -> (WriterHandle f -> IO a) -> IO a
 withWriter path = bracket (openWriter path) closeWriter
 
-write :: Naming f => WriterHandle f -> f Int64 -> W.Encoding -> IO ()
+write :: Naming f => WriterHandle f -> f Int64 -> B.ByteString -> IO ()
 write WriterHandle{..} ixs bs = mask $ \restore -> do
   ofs <- takeMVar vOffset
-  let ofs' = ofs + fromIntegral (W.getSize bs)
+  let ofs' = ofs + fromIntegral (B.length bs)
   restore (do
-    W.hPutEncoding hPayload bs
+    B.hPutStr hPayload bs
     sequence_ $ liftA2 (\h -> BB.hPutBuilder h . BB.int64BE) hIndices ixs
     BB.hPutBuilder hOffset $! BB.int64BE ofs'
     hFlush hPayload
@@ -105,7 +104,7 @@ write WriterHandle{..} ixs bs = mask $ \restore -> do
   putMVar vOffset ofs'
 
 data RequestType = AllItems | LastItem deriving (Show, Generic)
-instance Binary RequestType
+instance Serialize RequestType
 
 data Request = Request
   { streamName :: !B.ByteString
@@ -116,7 +115,7 @@ data Request = Request
   , reqFrom :: !Int
   , reqTo :: !Int
   } deriving (Show, Generic)
-instance Binary Request
+instance Serialize Request
 
 defRequest :: B.ByteString -> Request
 defRequest name = Request
@@ -149,8 +148,7 @@ createStream man path = do
   unless exist $ throwIO StreamNotFound
   initialOffsetsBS <- B.readFile offsetPath
   payloadHandle <- openBinaryFile payloadPath ReadMode
-  let getInts bs = runGet (replicateM (B.length bs `div` 8) get)
-        $ BL.fromStrict bs
+  let getInts bs = either error id $ runGet (replicateM (B.length bs `div` 8) get) bs
   let initialOffsets = IM.fromList $ zip [0..] $ getInts initialOffsetsBS
   vOffsets <- newTVarIO initialOffsets
   vCaughtUp <- newTVarIO False
@@ -170,10 +168,11 @@ createStream man path = do
     revVar <- newTVarIO $ IM.fromList $ zip [0..] initial
     return ((name, var), (name, revVar), do
       bs <- B.hGetNonBlocking h 8
-      let val = decode $ BL.fromStrict bs
-      return $ \i -> do
-        modifyTVar var $ IM.insert val i
-        modifyTVar revVar $ IM.insert i val
+      case decode bs of
+        Left err -> error err
+        Right val -> return $ \i -> do
+          modifyTVar var $ IM.insert val i
+          modifyTVar revVar $ IM.insert i val
       )
   let indices = HM.fromList indices_
   let reverseIndices = HM.fromList reverseIndices_
@@ -187,7 +186,7 @@ createStream man path = do
           atomically $ writeTVar vCaughtUp True
           atomically $ readTVar vCaughtUp >>= \b -> when b retry
         else do
-          let ofs = decode $ BL.fromStrict bs
+          let ofs = either error id $ decode bs
           upd <- sequence updateIndices
           atomically $ do
             i <- readTVar vCount
@@ -224,29 +223,29 @@ range begin end rt allOffsets snapshots = (isJust lastItem || not (null cont)
 splitR :: Int -> IM.IntMap a -> (IM.IntMap a, IM.IntMap a)
 splitR i m = let (l, p, r) = IM.splitLookup i m in (l, maybe id (IM.insert i) p r)
 
-data LisztError = MalformedRequest
+data FranzError = MalformedRequest
   | StreamNotFound
   | IndexNotFound
   | ArchiveDisabled
   deriving (Show, Generic)
-instance Binary LisztError
-instance Exception LisztError
+instance Serialize FranzError
+instance Exception FranzError
 
-data LisztReader = LisztReader
+data FranzReader = FranzReader
   { watchManager :: WatchManager
   , vStreams :: TVar (HM.HashMap B.ByteString Stream)
   , prefix :: FilePath
   }
 
-withLisztReader :: FilePath -> (LisztReader -> IO ()) -> IO ()
-withLisztReader prefix k = do
+withFranzReader :: FilePath -> (FranzReader -> IO ()) -> IO ()
+withFranzReader prefix k = do
   vStreams <- newTVarIO HM.empty
-  withManager $ \watchManager -> k LisztReader{..}
+  withManager $ \watchManager -> k FranzReader{..}
 
-handleRequest :: LisztReader
+handleRequest :: FranzReader
   -> Request
   -> IO (Handle, [(Int, IndexMap Int, Int, Int)])
-handleRequest LisztReader{..} (Request name bindex_ eindex_ timeout rt begin_ end_) = do
+handleRequest FranzReader{..} (Request name bindex_ eindex_ timeout rt begin_ end_) = do
   streams <- atomically $ readTVar vStreams
   let path = prefix </> B.unpack name
   Stream{..} <- case HM.lookup name streams of
@@ -291,7 +290,7 @@ handleRequest LisztReader{..} (Request name bindex_ eindex_ timeout rt begin_ en
 
     return (payloadHandle, offsets)
 
-fetchLocal :: LisztReader -> Request -> IO [(Int, IndexMap Int, B.ByteString)]
+fetchLocal :: FranzReader -> Request -> IO [(Int, IndexMap Int, B.ByteString)]
 fetchLocal env req = do
   (h, offsets) <- handleRequest env req
   forM offsets $ \(i, xs, pos, len) -> do
