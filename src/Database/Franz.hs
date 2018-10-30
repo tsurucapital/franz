@@ -97,8 +97,8 @@ write WriterHandle{..} ixs bs = mask $ \restore -> do
   let ofs' = ofs + fromIntegral (B.length bs)
   restore (do
     B.hPutStr hPayload bs
-    sequence_ $ liftA2 (\h -> BB.hPutBuilder h . BB.int64BE) hIndices ixs
-    BB.hPutBuilder hOffset $! BB.int64BE ofs'
+    sequence_ $ liftA2 (\h -> BB.hPutBuilder h . BB.int64LE) hIndices ixs
+    BB.hPutBuilder hOffset $! BB.int64LE ofs'
     hFlush hPayload
     ) `onException` putMVar vOffset ofs
   putMVar vOffset ofs'
@@ -148,7 +148,8 @@ createStream man path = do
   unless exist $ throwIO StreamNotFound
   initialOffsetsBS <- B.readFile offsetPath
   payloadHandle <- openBinaryFile payloadPath ReadMode
-  let getInts bs = either error id $ runGet (replicateM (B.length bs `div` 8) get) bs
+  let getInts bs = either error id
+        $ runGet (replicateM (B.length bs `div` 8) (fromIntegral <$> getInt64le)) bs
   let initialOffsets = IM.fromList $ zip [0..] $ getInts initialOffsetsBS
   vOffsets <- newTVarIO initialOffsets
   vCaughtUp <- newTVarIO False
@@ -186,7 +187,7 @@ createStream man path = do
           atomically $ writeTVar vCaughtUp True
           atomically $ readTVar vCaughtUp >>= \b -> when b retry
         else do
-          let ofs = either error id $ decode bs
+          let ofs = either error fromIntegral $ runGet getInt64le bs
           upd <- sequence updateIndices
           atomically $ do
             i <- readTVar vCount

@@ -61,9 +61,6 @@ startServer port prefix aprefix = withFranzReader prefix $ \env -> do
       forkFinally (do
         decode <$> SB.recv conn 4096 >>= \case
           Left _ -> throwIO MalformedRequest
-          Right Live -> do
-            SB.sendAll conn "READY"
-            forever $ respond env conn
           Right (Archive path) | Just apath <- aprefix -> do
             let src = apath </> B.unpack path
             let dest = prefix </> B.unpack path
@@ -91,7 +88,9 @@ startServer port prefix aprefix = withFranzReader prefix $ \env -> do
                       writeTVar vMountCount $ HM.insert path (n - 1) m
                       pure (pure ())
                     Nothing -> pure (pure ())
-          _ -> throwIO ArchiveDisabled
+          Right _ -> do
+            SB.sendAll conn "READY"
+            forever $ respond env conn
         )
         $ \result -> do
           case result of
@@ -119,7 +118,9 @@ connect host port dir = do
   resp <- SB.recv sock 4096
   case resp of
     "READY" -> Connection <$> newMVar sock
-    e -> fail $ "connect: Unexpected response: " ++ show e
+    msg -> case decode msg of
+      Right (ResponseError e) -> throw e
+      e -> fail $ "connect: Unexpected response: " ++ show e
 
 disconnect :: Connection -> IO ()
 disconnect (Connection sock) = takeMVar sock >>= S.close
