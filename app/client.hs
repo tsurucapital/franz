@@ -6,12 +6,13 @@ import Database.Franz.Network
 import Control.Monad
 import Data.Function (fix)
 import qualified Data.ByteString.Char8 as B
+import Network.Socket (PortNumber)
 import System.Environment
 import System.IO
 import System.Console.GetOpt
 import System.Exit
 
-parseHostPort :: String -> (String -> Int -> r) -> r
+parseHostPort :: String -> (String -> PortNumber -> r) -> r
 parseHostPort str k = case break (==':') str of
   (host, ':' : port) -> k host (read port)
   (host, _) -> k host 1886
@@ -61,7 +62,7 @@ main :: IO ()
 main = getOpt Permute options <$> getArgs >>= \case
   (fs, name : _, []) -> do
     let o = foldl (flip id) defaultOptions fs
-    parseHostPort (host o) withConnection Live $ \conn -> do
+    parseHostPort (host o) withConnection mempty $ \conn -> do
       let name' = B.pack name
       let timeout' = floor $ timeout o * 1000000
       let req = Request name' (index o) (index o) timeout' AllItems

@@ -5,9 +5,10 @@ import Database.Franz.Network
 import System.Environment
 import System.Console.GetOpt
 import System.Exit
+import Network.Socket (PortNumber)
 
 data Options = Options
-  { port :: Int
+  { port :: PortNumber
   }
 
 defaultOptions :: Options

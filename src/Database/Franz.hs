@@ -77,7 +77,7 @@ openWriter path = do
   hOffset <- openFile offsetPath AppendMode
   liftIO $ hSetBuffering hOffset NoBuffering
   hIndices <- forM idents $ \s -> do
-    h <- openFile (indexPath <.> s) AppendMode
+    h <- openFile (indexPath ++ "." ++ s) AppendMode
     hSetBuffering h NoBuffering
     return h
   return WriterHandle{..}
@@ -92,16 +92,13 @@ withWriter :: Naming f => FilePath -> (WriterHandle f -> IO a) -> IO a
 withWriter path = bracket (openWriter path) closeWriter
 
 write :: Naming f => WriterHandle f -> f Int64 -> B.ByteString -> IO ()
-write WriterHandle{..} ixs bs = mask $ \restore -> do
-  ofs <- takeMVar vOffset
+write WriterHandle{..} ixs bs = modifyMVar_ vOffset $ \ofs -> do
   let ofs' = ofs + fromIntegral (B.length bs)
-  restore (do
-    B.hPutStr hPayload bs
-    sequence_ $ liftA2 (\h -> BB.hPutBuilder h . BB.int64LE) hIndices ixs
-    BB.hPutBuilder hOffset $! BB.int64LE ofs'
-    hFlush hPayload
-    ) `onException` putMVar vOffset ofs
-  putMVar vOffset ofs'
+  B.hPutStr hPayload bs
+  sequence_ $ liftA2 (\h -> BB.hPutBuilder h . BB.int64LE) hIndices ixs
+  BB.hPutBuilder hOffset $! BB.int64LE ofs'
+  hFlush hPayload
+  return ofs'
 
 data RequestType = AllItems | LastItem deriving (Show, Generic)
 instance Serialize RequestType
@@ -110,7 +107,7 @@ data Request = Request
   { streamName :: !B.ByteString
   , reqFromIndex :: !(Maybe B.ByteString)
   , reqToIndex :: !(Maybe B.ByteString)
-  , reqTimeout :: !Int
+  , reqTimeout :: !Int -- microseconds
   , reqType :: !RequestType
   , reqFrom :: !Int
   , reqTo :: !Int
@@ -161,7 +158,7 @@ createStream man path = do
 
   indexNames <- B.lines <$> B.readFile (path </> "indices")
   (indices_, reverseIndices_, updateIndices) <- fmap unzip3 $ forM indexNames $ \name -> do
-    let indexPath = path </> "indices" <.> B.unpack name
+    let indexPath = path </> "indices" ++ "." ++ B.unpack name
     initial <- getInts <$> B.readFile indexPath
     h <- openBinaryFile indexPath ReadMode
     hSeek h SeekFromEnd 0
@@ -185,7 +182,7 @@ createStream man path = do
       if B.null bs
         then do
           atomically $ writeTVar vCaughtUp True
-          atomically $ readTVar vCaughtUp >>= \b -> when b retry
+          atomically $ readTVar vCaughtUp >>= check . not
         else do
           let ofs = either error fromIntegral $ runGet getInt64le bs
           upd <- sequence updateIndices
@@ -244,11 +241,12 @@ withFranzReader prefix k = do
   withManager $ \watchManager -> k FranzReader{..}
 
 handleRequest :: FranzReader
+  -> FilePath
   -> Request
   -> IO (Handle, [(Int, IndexMap Int, Int, Int)])
-handleRequest FranzReader{..} (Request name bindex_ eindex_ timeout rt begin_ end_) = do
+handleRequest FranzReader{..} dir (Request name bindex_ eindex_ timeout rt begin_ end_) = do
   streams <- atomically $ readTVar vStreams
-  let path = prefix </> B.unpack name
+  let path = prefix </> dir </> B.unpack name
   Stream{..} <- case HM.lookup name streams of
     Nothing -> do
       s <- createStream watchManager path
@@ -291,9 +289,9 @@ handleRequest FranzReader{..} (Request name bindex_ eindex_ timeout rt begin_ en
 
     return (payloadHandle, offsets)
 
-fetchLocal :: FranzReader -> Request -> IO [(Int, IndexMap Int, B.ByteString)]
-fetchLocal env req = do
-  (h, offsets) <- handleRequest env req
+fetchLocal :: FranzReader -> FilePath -> Request -> IO [(Int, IndexMap Int, B.ByteString)]
+fetchLocal env path req = do
+  (h, offsets) <- handleRequest env path req
   forM offsets $ \(i, xs, pos, len) -> do
     hSeek h AbsoluteSeek $ fromIntegral pos
     (,,) i xs <$> B.hGet h len

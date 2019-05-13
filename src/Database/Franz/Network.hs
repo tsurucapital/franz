@@ -2,7 +2,6 @@
 module Database.Franz.Network
   (startServer
   , Connection
-  , Directory(..)
   , withConnection
   , connect
   , disconnect
@@ -27,23 +26,20 @@ import System.FilePath
 import System.IO
 import System.Process
 
-data Response = ResponseSuccess !Int
+data Response = ResponseSuccess !Int -- number of messages
     | ResponseError !FranzError
     deriving (Show, Generic)
 instance Serialize Response
 
-respond :: FranzReader -> S.Socket -> IO ()
-respond env conn = do
-  msg <- SB.recv conn 4096
-  (payloadHandle, offsets) <- case decode msg of
-    Left _ -> throwIO MalformedRequest
-    Right a -> handleRequest env a
+respond :: FranzReader -> B.ByteString -> S.Socket -> IO ()
+respond env path conn = do
+  (payloadHandle, offsets) <- runGetRecv conn get >>= handleRequest env (B.unpack path)
   SB.sendAll conn $ encode $ ResponseSuccess $ length offsets
   forM_ offsets $ \(i, xs, pos, len) -> do
     SB.sendAll conn $ encode (i, HM.toList xs, len)
     SF.sendFile' conn payloadHandle (fromIntegral pos) (fromIntegral len)
 
-startServer :: Int
+startServer :: S.PortNumber
     -> FilePath -- live prefix
     -> Maybe FilePath -- archive prefix
     -> IO ()
@@ -61,22 +57,20 @@ startServer port prefix aprefix = withFranzReader prefix $ \env -> do
       forkFinally (do
         decode <$> SB.recv conn 4096 >>= \case
           Left _ -> throwIO MalformedRequest
-          Right (Archive path) | Just apath <- aprefix -> do
+          Right path | Just apath <- aprefix -> do
             let src = apath </> B.unpack path
             let dest = prefix </> B.unpack path
             join $ atomically $ do
               m <- readTVar vMountCount
               case HM.lookup path m of
-                Nothing -> do
-                  writeTVar vMountCount $ HM.insert path 1 m
-                  return $ do
-                    b <- doesFileExist src
-                    when b $ do
-                      createDirectoryIfMissing True dest
-                      callProcess "squashfuse" [src, dest]
+                Nothing -> return $ do
+                  b <- doesFileExist src
+                  when b $ do
+                    createDirectoryIfMissing True dest
+                    callProcess "squashfuse" [src, dest]
+                    atomically $ writeTVar vMountCount $! HM.insert path 1 m
                 Just n -> fmap pure $ writeTVar vMountCount $ HM.insert path (n + 1) m
-            SB.sendAll conn "READY"
-            forever (respond env conn)
+            (SB.sendAll conn "READY" >> forever (respond env path conn))
               `finally` do
                 join $ atomically $ do
                   m <- readTVar vMountCount
@@ -85,12 +79,12 @@ startServer port prefix aprefix = withFranzReader prefix $ \env -> do
                       writeTVar vMountCount $ HM.delete path m
                       return $ callProcess "fusermount" ["-u", dest]
                     Just n -> do
-                      writeTVar vMountCount $ HM.insert path (n - 1) m
+                      writeTVar vMountCount $! HM.insert path (n - 1) m
                       pure (pure ())
                     Nothing -> pure (pure ())
-          Right _ -> do
+          Right path -> do
             SB.sendAll conn "READY"
-            forever $ respond env conn
+            forever $ respond env path conn
         )
         $ \result -> do
           case result of
@@ -100,15 +94,19 @@ startServer port prefix aprefix = withFranzReader prefix $ \env -> do
             Right _ -> return ()
           S.close conn
 
+-- The Protocol
+--
+-- Client: Let P be an archive prefix. Send P
+-- Server: Receive P. If P exists, mount it. Send "READY" and start a loop.
+--         If it doesn't, look for a live stream prefixed by P.
+-- Client: Receive "READY"
+
 newtype Connection = Connection (MVar S.Socket)
 
-withConnection :: String -> Int -> Directory -> (Connection -> IO r) -> IO r
+withConnection :: String -> S.PortNumber -> B.ByteString -> (Connection -> IO r) -> IO r
 withConnection host port dir = bracket (connect host port dir) disconnect
 
-data Directory = Live | Archive !B.ByteString deriving (Show, Generic)
-instance Serialize Directory
-
-connect :: String -> Int -> Directory -> IO Connection
+connect :: String -> S.PortNumber -> B.ByteString -> IO Connection
 connect host port dir = do
   let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
   addr:_ <- S.getAddrInfo (Just hints) (Just host) (Just $ show port)
@@ -125,17 +123,23 @@ connect host port dir = do
 disconnect :: Connection -> IO ()
 disconnect (Connection sock) = takeMVar sock >>= S.close
 
-fetch :: Connection -> Request -> IO [(Int, IndexMap Int, B.ByteString)]
-fetch (Connection vsock) req = modifyMVar vsock $ \sock -> do
-  SB.sendAll sock $ encode req
-  let go (Done (Right a) _) = return (sock, a)
-      go (Done (Left e) _) = throwIO e
+runGetRecv :: S.Socket -> Get a -> IO a
+runGetRecv sock m = do
+  let go (Done a _) = return a
       go (Partial cont) = do
         bs <- SB.recv sock 4096
         if B.null bs then go $ cont "" else go $ cont bs
-      go (Fail str _) = fail $ show req ++ ": " ++ str
+      go (Fail _ _) = throwIO MalformedRequest
   bs <- SB.recv sock 4096
-  go $ flip runGetPartial bs $ get >>= \case
+  go $ runGetPartial m bs
+
+fetch :: Connection -> Request -> IO [(Int, IndexMap Int, B.ByteString)]
+fetch (Connection vsock) req = modifyMVar vsock $ \sock -> do
+  SB.sendAll sock $ encode req
+  r <- runGetRecv sock $ get >>= \case
     ResponseSuccess n -> fmap Right $ replicateM n
       $ (,,) <$> get <*> fmap HM.fromList get <*> get
     ResponseError e -> return $ Left e
+  case r of
+    Right a -> return (sock, a)
+    Left e -> throwIO e
