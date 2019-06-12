@@ -27,6 +27,7 @@ source-repository head
 library
   exposed-modules:
       Database.Franz
+      Database.Franz.Reader
       Database.Franz.Network
   other-modules:
       Paths_franz
@@ -48,6 +49,7 @@ library
     , transformers
     , unordered-containers
   default-language: Haskell2010
+  ghc-options: -Wall -Wcompat
 
 executable franz
   main-is: client.hs
@@ -58,19 +60,8 @@ executable franz
   build-depends:
       base >=4.7 && <5
     , bytestring
-    , cereal
-    , containers
-    , directory
-    , filepath
     , franz
-    , fsnotify
     , network
-    , process
-    , sendfile
-    , stm
-    , stm-delay
-    , transformers
-    , unordered-containers
   default-language: Haskell2010
 
 executable franzd
@@ -82,18 +73,6 @@ executable franzd
   ghc-options: -threaded
   build-depends:
       base >=4.7 && <5
-    , bytestring
-    , cereal
-    , containers
-    , directory
-    , filepath
     , franz
-    , fsnotify
     , network
-    , process
-    , sendfile
-    , stm
-    , stm-delay
-    , transformers
-    , unordered-containers
   default-language: Haskell2010

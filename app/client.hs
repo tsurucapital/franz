@@ -5,6 +5,7 @@ import Database.Franz.Network
 
 import Control.Monad
 import Data.Function (fix)
+import Data.Functor.Identity
 import qualified Data.ByteString.Char8 as B
 import Network.Socket (PortNumber)
 import System.Environment
@@ -65,12 +66,11 @@ main = getOpt Permute options <$> getArgs >>= \case
     parseHostPort (host o) withConnection mempty $ \conn -> do
       let name' = B.pack name
       let timeout' = floor $ timeout o * 1000000
-      let req = Request name' (index o) (index o) timeout' AllItems
-      forM_ (reverse $ ranges o) $ \(i, j) -> do
-        bss <- fetch conn $ req i j
-        mapM_ (printBS o) bss
-      forM_ (beginning o) $ \start -> flip fix start $ \self i -> do
-        bss <- fetch conn $ req i i
+      let req i j = pure $ Request timeout' $ pure $ RequestLine name' (index o) (index o) AllItems i j
+      forM_ (reverse $ ranges o) $ \(i, j) -> fetch conn (req i j)
+        $ \(Identity resp) -> awaitResponse resp >>= mapM_ (printBS o) . runIdentity
+      forM_ (beginning o) $ \start -> flip fix start $ \self i -> fetch conn (req i i) $ \(Identity resp) -> do
+        Identity bss <- awaitResponse resp
         mapM_ (printBS o) bss
         unless (null bss) $ self $ let (j, _, _) = last bss in j + 1
 
