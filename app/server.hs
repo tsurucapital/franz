@@ -13,7 +13,7 @@ data Options = Options
 
 defaultOptions :: Options
 defaultOptions = Options
-  { port = 1886
+  { port = defaultPort
   }
 
 options :: [OptDescr (Options -> Options)]
@@ -29,4 +29,4 @@ main = getOpt Permute options <$> getArgs >>= \case
       [] -> startServer (port o) "." Nothing
   (_, _, es) -> do
     name <- getProgName
-    die $ unlines es ++ usageInfo name options
+    die $ unlines ("franzd [-p PORT] PATH [ARCHIVE_PATH]" : es) ++ usageInfo name options

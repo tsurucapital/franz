@@ -4,6 +4,7 @@ import Database.Franz
 import Database.Franz.Network
 
 import Control.Monad
+import Control.Concurrent.STM
 import Data.Function (fix)
 import Data.Functor.Identity
 import qualified Data.ByteString.Char8 as B
@@ -16,7 +17,7 @@ import System.Exit
 parseHostPort :: String -> (String -> PortNumber -> r) -> r
 parseHostPort str k = case break (==':') str of
   (host, ':' : port) -> k host (read port)
-  (host, _) -> k host 1886
+  (host, _) -> k host defaultPort
 
 data Options = Options
   { host :: String
@@ -28,7 +29,7 @@ data Options = Options
   }
 
 readOffset :: String -> Int
-readOffset ('_' : n) = -1 - read n
+readOffset ('_' : n) = -read n
 readOffset n = read n
 
 options :: [OptDescr (Options -> Options)]
@@ -61,19 +62,19 @@ printBS o (_, _, bs) = do
 
 main :: IO ()
 main = getOpt Permute options <$> getArgs >>= \case
-  (fs, name : _, []) -> do
+  (fs, [name], []) -> do
     let o = foldl (flip id) defaultOptions fs
     parseHostPort (host o) withConnection mempty $ \conn -> do
       let name' = B.pack name
       let timeout' = floor $ timeout o * 1000000
-      let req i j = pure $ Request timeout' $ pure $ RequestLine name' (index o) (index o) AllItems i j
-      forM_ (reverse $ ranges o) $ \(i, j) -> fetch conn (req i j)
-        $ \(Identity resp) -> awaitResponse resp >>= mapM_ (printBS o) . runIdentity
-      forM_ (beginning o) $ \start -> flip fix start $ \self i -> fetch conn (req i i) $ \(Identity resp) -> do
-        Identity bss <- awaitResponse resp
+      let req i j = Query name' (index o) (index o) AllItems i j
+      forM_ (reverse $ ranges o) $ \(i, j) -> fetchSimple conn timeout' (req i j)
+        >>= mapM_ (printBS o)
+      forM_ (beginning o) $ \start -> flip fix start $ \self i -> do
+        bss <- fetchSimple conn timeout' (req i i)
         mapM_ (printBS o) bss
         unless (null bss) $ self $ let (j, _, _) = last bss in j + 1
 
   (_, _, es) -> do
     name <- getProgName
-    die $ unlines es ++ usageInfo name options
+    die $ unlines ("franz [OPTIONS] STREAM" : es) ++ usageInfo name options
