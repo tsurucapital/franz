@@ -96,11 +96,17 @@ respond env refThreads (B.unpack -> path) buf conn = runGetRecv buf conn get >>=
       SB.sendAll conn $ encode (s0, s1, names)
       SF.sendFile' conn h (fromIntegral p0) (fromIntegral $ p1 - p0)
 
-startServer :: S.PortNumber
+startServer
+    :: Double -- reaping interval
+    -> Double -- stream life (seconds)
+    -> S.PortNumber
     -> FilePath -- live prefix
     -> Maybe FilePath -- archive prefix
     -> IO ()
-startServer port lprefix aprefix = withFranzReader lprefix $ \env -> do
+startServer interval life port lprefix aprefix = withFranzReader lprefix $ \env -> do
+
+  _ <- forkIO $ reaper interval life env
+
   vMountCount <- newTVarIO (HM.empty :: HM.HashMap B.ByteString Int)
   let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICHOST, S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
   addr:_ <- S.getAddrInfo (Just hints) (Just "0.0.0.0") (Just $ show port)

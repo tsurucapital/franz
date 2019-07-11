@@ -12,6 +12,7 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.HashMap.Strict as HM
 import qualified Data.IntMap.Strict as IM
 import Data.Maybe (isJust)
+import GHC.Clock (getMonotonicTime)
 import GHC.Generics (Generic)
 import System.Directory
 import System.FilePath
@@ -39,6 +40,7 @@ data Stream = Stream
   , vCaughtUp :: TVar Bool
   , followThread :: ThreadId
   , payloadHandle :: Handle
+  , vTimestamp :: TVar Double
   }
 
 createStream :: WatchManager -> FilePath -> IO Stream
@@ -92,6 +94,7 @@ createStream man path = do
 
   let indices = HM.fromList $ zip indexNames vIndices
 
+  vTimestamp <- getMonotonicTime >>= newTVarIO
   return Stream{..}
 
 type QueryResult = ((Int, Int) -- starting SeqNo, byte offset
@@ -132,6 +135,19 @@ data FranzReader = FranzReader
   , prefix :: FilePath
   }
 
+reaper :: Double -- interval
+  -> Double -- lifetime
+  -> FranzReader -> IO ()
+reaper int life FranzReader{..} = forever $ do
+  now <- getMonotonicTime
+  atomically $ do
+    m <- readTVar vStreams
+    m' <- forM m $ \s -> do
+      t <- readTVar $ vTimestamp s
+      return $ s <$ guard (now - t <= life)
+    writeTVar vStreams $! HM.mapMaybe id m'
+  threadDelay $ floor $ int * 1e6
+
 withFranzReader :: FilePath -> (FranzReader -> IO ()) -> IO ()
 withFranzReader prefix k = do
   vStreams <- newTVarIO HM.empty
@@ -150,7 +166,9 @@ handleQuery FranzReader{..} dir (Query name bindex_ eindex_ rt begin_ end_) = do
       s <- createStream watchManager path
       atomically $ modifyTVar' vStreams $ HM.insert streamId s
       return s
-    Just vStream -> return vStream
+    Just vStream -> do
+      getMonotonicTime >>= atomically . writeTVar (vTimestamp vStream)
+      return vStream
   return $ do
     readTVar vCaughtUp >>= check
     allOffsets <- readTVar vOffsets
