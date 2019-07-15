@@ -1,0 +1,12 @@
+default-job:
+  script: "cabal new-build"
+  except:
+    - tags
+
+release-job:
+  script: "cabal new-install --installdir=release --install-method=copy"
+  artifacts:
+    paths:
+      - release/*
+  only:
+    - tags
