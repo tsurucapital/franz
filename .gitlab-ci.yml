@@ -1,0 +1,24 @@
+variables:
+  CABAL: "/opt/cabal/bin/cabal-2.4 --with-compiler=/usr/local/ghc/ghc-8.6.4.0/bin/ghc"
+
+before_script:
+  - "$CABAL v2-update"
+
+default:
+  script: "$CABAL v2-build"
+  except:
+    - tags
+
+after_script:
+  - "mkdir -p release"
+  - "cp dist-newstyle/build/x86_64-linux/ghc-8.6.4.0/franz-0.1.0.0/x/franzd/build/franzd/franzd release/franzd"
+  - "cp dist-newstyle/build/x86_64-linux/ghc-8.6.4.0/franz-0.1.0.0/x/franz/build/franz/franz release/franz"
+
+release:
+  script: "$CABAL v2-build"
+  artifacts:
+    paths:
+      - release/franz
+      - release/franzd
+  only:
+    - tags
