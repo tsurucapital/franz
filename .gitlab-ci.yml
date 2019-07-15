@@ -7,7 +7,7 @@ before_script:
 default:
   script: "$CABAL v2-build"
   except:
-    - tags
+    - master
 
 after_script:
   - "mkdir -p release"
@@ -21,4 +21,4 @@ release:
       - release/franz
       - release/franzd
   only:
-    - tags
+    - master
