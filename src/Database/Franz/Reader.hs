@@ -40,8 +40,26 @@ data Stream = Stream
   , vCaughtUp :: TVar Bool
   , followThread :: ThreadId
   , payloadHandle :: Handle
-  , vTimestamp :: TVar Double
+  , vActivity :: TVar Activity
   }
+
+type Activity = Either Double Int
+
+addActivity :: Activity -> Activity
+addActivity (Left _) = Right 0
+addActivity (Right n) = Right (n + 1)
+
+removeActivity :: IO (Activity -> Activity)
+removeActivity = do
+  now <- getMonotonicTime
+  return $ \case
+    Left _ -> Left now
+    Right n
+      | n <= 0 -> Left now
+      | otherwise -> Right (n - 1)
+
+closeStream :: Stream -> IO ()
+closeStream = killThread . followThread
 
 createStream :: WatchManager -> FilePath -> IO Stream
 createStream man path = do
@@ -51,9 +69,9 @@ createStream man path = do
   unless exist $ throwIO $ StreamNotFound offsetPath
   initialOffsetsBS <- B.readFile offsetPath
   payloadHandle <- openBinaryFile payloadPath ReadMode
-  let getInts bs = either error id
+  let getInts bs = either (throwIO . InternalError) pure
         $ runGet (replicateM (B.length bs `div` 8) (fromIntegral <$> getInt64le)) bs
-  let initialOffsets = IM.fromList $ zip [0..] $ getInts initialOffsetsBS
+  initialOffsets <- IM.fromList . zip [0..] <$> getInts initialOffsetsBS
   vOffsets <- newTVarIO initialOffsets
   vCaughtUp <- newTVarIO False
   vCount <- newTVarIO $ IM.size initialOffsets
@@ -65,12 +83,12 @@ createStream man path = do
   indexNames <- B.lines <$> B.readFile (path </> "indices")
   vIndices <- forM indexNames $ \name -> do
     let indexPath = path </> "indices" ++ "." ++ B.unpack name
-    initial <- getInts <$> B.readFile indexPath
+    initial <- B.readFile indexPath >>= getInts
     newTVarIO $ IM.fromList $ zip initial [0..]
 
   followThread <- forkIO $ withFile offsetPath ReadMode $ \h -> do
     forM_ (IM.maxViewWithKey initialOffsets) $ \((i, ofs), _) -> do
-      hSeek h AbsoluteSeek $ fromIntegral $ i * 8
+      hSeek h AbsoluteSeek $ fromIntegral $ succ i * 8
       hSeek payloadHandle AbsoluteSeek $ fromIntegral ofs
     forever $ do
       bs <- B.hGet h 8
@@ -79,9 +97,9 @@ createStream man path = do
           atomically $ writeTVar vCaughtUp True
           atomically $ readTVar vCaughtUp >>= check . not
         else do
-          let ofs = either error fromIntegral $ runGet getInt64le bs
+          ofs <- either (throwIO . InternalError) (pure . fromIntegral) $ runGet getInt64le bs
           header <- B.hGet payloadHandle $ 8 * (length indexNames + 1)
-          (len, indices) <- either fail pure $ flip runGet header $ (,)
+          (len, indices) <- either (throwIO . InternalError) pure $ flip runGet header $ (,)
             <$> getInt64le
             <*> traverse (const getInt64le) indexNames
           hSeek payloadHandle RelativeSeek $ fromIntegral len
@@ -94,7 +112,7 @@ createStream man path = do
 
   let indices = HM.fromList $ zip indexNames vIndices
 
-  vTimestamp <- getMonotonicTime >>= newTVarIO
+  vActivity <- getMonotonicTime >>= newTVarIO . Left
   return Stream{..}
 
 type QueryResult = ((Int, Int) -- starting SeqNo, byte offset
@@ -125,6 +143,8 @@ splitR i m = let (l, p, r) = IM.splitLookup i m in (l, maybe id (IM.insert i) p 
 data FranzException = MalformedRequest !String
   | StreamNotFound !FilePath
   | IndexNotFound !B.ByteString ![B.ByteString]
+  | InternalError !String
+  | ClientError !String
   deriving (Show, Generic)
 instance Serialize FranzException
 instance Exception FranzException
@@ -140,12 +160,15 @@ reaper :: Double -- interval
   -> FranzReader -> IO ()
 reaper int life FranzReader{..} = forever $ do
   now <- getMonotonicTime
-  atomically $ do
+  xs <- atomically $ do
+    list <- newTVar []
     m <- readTVar vStreams
-    m' <- forM m $ \s -> do
-      t <- readTVar $ vTimestamp s
-      return $ s <$ guard (now - t <= life)
+    m' <- forM m $ \s -> readTVar (vActivity s) >>= \case
+      Left t | now - t >= life -> Nothing <$ modifyTVar list (s:)
+      _ -> pure $ Just s
     writeTVar vStreams $! HM.mapMaybe id m'
+    readTVar list
+  mapM_ closeStream xs
   threadDelay $ floor $ int * 1e6
 
 withFranzReader :: FilePath -> (FranzReader -> IO ()) -> IO ()
@@ -156,7 +179,7 @@ withFranzReader prefix k = do
 handleQuery :: FranzReader
   -> FilePath
   -> Query
-  -> IO (STM (Bool, Handle, [B.ByteString], QueryResult))
+  -> IO (STM (Bool, Handle, [B.ByteString], QueryResult, IO ()))
 handleQuery FranzReader{..} dir (Query name bindex_ eindex_ rt begin_ end_) = do
   streams <- atomically $ readTVar vStreams
   let path = prefix </> dir </> B.unpack name
@@ -166,10 +189,9 @@ handleQuery FranzReader{..} dir (Query name bindex_ eindex_ rt begin_ end_) = do
       s <- createStream watchManager path
       atomically $ modifyTVar' vStreams $ HM.insert streamId s
       return s
-    Just vStream -> do
-      getMonotonicTime >>= atomically . writeTVar (vTimestamp vStream)
-      return vStream
+    Just vStream -> return vStream
   return $ do
+    modifyTVar' vActivity addActivity
     readTVar vCaughtUp >>= check
     allOffsets <- readTVar vOffsets
     let finalOffset = case IM.maxViewWithKey allOffsets of
@@ -196,5 +218,5 @@ handleQuery FranzReader{..} dir (Query name bindex_ eindex_ rt begin_ end_) = do
           let body' = maybe id (IM.insert end_) lastItem body
           return $! maybe minBound fst $ IM.maxView body'
     let (ready, result) = range begin end rt allOffsets
-
-    return (ready, payloadHandle, indexNames, result)
+    let reset = removeActivity >>= atomically . modifyTVar' vActivity
+    return (ready, payloadHandle, indexNames, result, reset)

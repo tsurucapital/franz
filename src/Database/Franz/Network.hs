@@ -66,11 +66,12 @@ respond env refThreads (B.unpack -> path) buf conn = runGetRecv buf conn get >>=
   Right (RawRequest reqId req) -> do
     query <- handleQuery env path req
     join $ atomically $ do
-      (ready, h, names, offsets) <- query
+      (ready, h, names, offsets, reset) <- query
       return $ if ready
         then do
           sendHeader $ ResponseInstant reqId
           send h names offsets
+          reset
         else do
           m <- readIORef refThreads
           if IM.member reqId m
@@ -79,11 +80,12 @@ respond env refThreads (B.unpack -> path) buf conn = runGetRecv buf conn get >>=
               sendHeader $ ResponseWait reqId
               -- Fork a thread to send a delayed response
               tid <- forkIO $ join $ atomically $ do
-                (ready', h', names', offsets') <- query
+                (ready', h', names', offsets', _) <- query
                 check ready'
                 return $ do
                   sendHeader $ ResponseDelayed reqId
                   send h' names' offsets'
+                  reset
               writeIORef refThreads $! IM.insert reqId tid m
   Right (RawClean reqId) -> do
     m <- readIORef refThreads
@@ -120,6 +122,7 @@ startServer interval life port lprefix aprefix = withFranzReader lprefix $ \env 
       (conn, _) <- S.accept sock
 
       let respondLoop path = do
+            SB.sendAll conn apiVersion
             ref <- newIORef IM.empty
             buf <- newIORef B.empty
             forever (respond env ref path buf conn) `finally` do
@@ -141,7 +144,7 @@ startServer interval life port lprefix aprefix = withFranzReader lprefix $ \env 
                     callProcess "squashfuse" [src, dest]
                     atomically $ writeTVar vMountCount $! HM.insert path 1 m
                 Just n -> fmap pure $ writeTVar vMountCount $ HM.insert path (n + 1) m
-            (SB.sendAll conn "READY" >> respondLoop path)
+            respondLoop path
               `finally` do
                 join $ atomically $ do
                   m <- readTVar vMountCount
@@ -153,9 +156,7 @@ startServer interval life port lprefix aprefix = withFranzReader lprefix $ \env 
                       writeTVar vMountCount $! HM.insert path (n - 1) m
                       pure (pure ())
                     Nothing -> pure (pure ())
-          Right path -> do
-            SB.sendAll conn "READY"
-            respondLoop path
+          Right path -> respondLoop path
         )
         $ \result -> do
           case result of
@@ -188,6 +189,9 @@ data ResponseStatus a = WaitingInstant
 withConnection :: String -> S.PortNumber -> B.ByteString -> (Connection -> IO r) -> IO r
 withConnection host port dir = bracket (connect host port dir) disconnect
 
+apiVersion :: B.ByteString
+apiVersion = "0"
+
 connect :: String -> S.PortNumber -> B.ByteString -> IO Connection
 connect host port dir = do
   let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
@@ -196,42 +200,41 @@ connect host port dir = do
   S.connect sock $ S.addrAddress addr
   SB.sendAll sock $ encode dir
   readyMsg <- SB.recv sock 4096
-  case readyMsg of
-    "READY" -> do
-      connSocket <- newMVar sock
-      connReqId <- newTVarIO 0
-      connStates <- newTVarIO IM.empty
-      buf <- newIORef B.empty
-      connThread <- flip forkFinally (either throwIO pure) $ forever
-        $ (>>=either fail atomically) $ runGetRecv buf sock $ get >>= \case
-          ResponseInstant i -> do
-            resp <- getResponse
-            return $ do
-              m <- readTVar connStates
-              case IM.lookup i m of
-                Just WaitingInstant -> writeTVar connStates $! IM.insert i (Available resp) m
-                e -> fail $ "Unexpected state on ResponseInstant " ++ show i ++ ": " ++ show e
-          ResponseWait i -> return $ do
-            m <- readTVar connStates
-            case IM.lookup i m of
-              Just WaitingInstant -> writeTVar connStates $! IM.insert i WaitingDelayed m
-              e -> fail $ "Unexpected state on ResponseWait " ++ show i ++ ": " ++ show e
-          ResponseDelayed i -> do
-            resp <- getResponse
-            return $ do
-              m <- readTVar connStates
-              case IM.lookup i m of
-                Just WaitingDelayed -> writeTVar connStates $! IM.insert i (Available resp) m
-                e -> fail $ "Unexpected state on ResponseDelayed " ++ show i ++ ": " ++ show e
-          ResponseError i e -> return $ do
-            m <- readTVar connStates
-            case IM.lookup i m of
-              Nothing -> throwSTM e
-              Just _ -> writeTVar connStates $! IM.insert i (Errored e) m
-      return Connection{..}
-    _ -> case decode readyMsg of
-      Right (ResponseError _ e) -> throwIO e
-      e -> fail $ "Database.Franz.Network.connect: Unexpected response: " ++ show e
+  unless (readyMsg == apiVersion) $ case decode readyMsg of
+    Right (ResponseError _ e) -> throwIO e
+    e -> throwIO $ ClientError $ "Database.Franz.Network.connect: Unexpected response: " ++ show e
+
+  connSocket <- newMVar sock
+  connReqId <- newTVarIO 0
+  connStates <- newTVarIO IM.empty
+  buf <- newIORef B.empty
+  connThread <- flip forkFinally (either throwIO pure) $ forever
+    $ (>>=either (throwIO . ClientError) atomically) $ runGetRecv buf sock $ get >>= \case
+      ResponseInstant i -> do
+        resp <- getResponse
+        return $ do
+          m <- readTVar connStates
+          case IM.lookup i m of
+            Just WaitingInstant -> writeTVar connStates $! IM.insert i (Available resp) m
+            e -> throwSTM $ ClientError $ "Unexpected state on ResponseInstant " ++ show i ++ ": " ++ show e
+      ResponseWait i -> return $ do
+        m <- readTVar connStates
+        case IM.lookup i m of
+          Just WaitingInstant -> writeTVar connStates $! IM.insert i WaitingDelayed m
+          e -> throwSTM $ ClientError $ "Unexpected state on ResponseWait " ++ show i ++ ": " ++ show e
+      ResponseDelayed i -> do
+        resp <- getResponse
+        return $ do
+          m <- readTVar connStates
+          case IM.lookup i m of
+            Just WaitingDelayed -> writeTVar connStates $! IM.insert i (Available resp) m
+            e -> throwSTM $ ClientError $ "Unexpected state on ResponseDelayed " ++ show i ++ ": " ++ show e
+      ResponseError i e -> return $ do
+        m <- readTVar connStates
+        case IM.lookup i m of
+          Nothing -> throwSTM e
+          Just _ -> writeTVar connStates $! IM.insert i (Errored e) m
+  return Connection{..}
 
 disconnect :: Connection -> IO ()
 disconnect Connection{..} = do
@@ -314,7 +317,7 @@ fetch Connection{..} req cont = do
               writeTVar connStates $! IM.delete reqId m'
               return xs
             Just (Errored e) -> throwSTM e
-            Just WaitingInstant -> fail $ "fetch/WaitingDelayed: unexpected state WaitingInstant"
+            Just WaitingInstant -> throwSTM $ ClientError $ "fetch/WaitingDelayed: unexpected state WaitingInstant"
         Just (Errored e) -> throwSTM e
   cont go `finally` do
     withMVar connSocket $ \sock -> do
