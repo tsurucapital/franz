@@ -67,7 +67,8 @@ main = getOpt Permute options <$> getArgs >>= \case
     parseHostPort (host o) withConnection mempty $ \conn -> do
       let name' = B.pack name
       let timeout' = floor $ timeout o * 1000000
-      let req i j = Query name' (index o) (index o) AllItems i j
+      let f = maybe BySeqNum ByIndex (index o)
+      let req i j = Query name' (f i) (f j) AllItems
       forM_ (reverse $ ranges o) $ \(i, j) -> fetchSimple conn timeout' (req i j)
         >>= mapM_ (printBS o)
       forM_ (beginning o) $ \start -> flip fix start $ \self i -> do

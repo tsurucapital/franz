@@ -47,6 +47,7 @@ library
     , stm
     , stm-delay
     , transformers
+    , vector
     , unordered-containers
   default-language: Haskell2010
   ghc-options: -Wall -Wcompat

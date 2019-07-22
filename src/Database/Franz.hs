@@ -1,5 +1,6 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE KindSignatures #-}
 module Database.Franz (
     -- * Writer interface
     WriterHandle,
@@ -10,23 +11,21 @@ module Database.Franz (
     writeMany
     ) where
 
-import Control.Applicative
 import Control.Concurrent
 import Control.Exception
-import Control.Monad
 import qualified Data.ByteString.Builder as BB
 import qualified Data.ByteString.Char8 as B
 import Data.Foldable (toList)
 import Data.Int
 import Data.IORef
+import Data.Kind (Type)
 import System.Directory
 import System.FilePath
 import System.IO
 
-data WriterHandle f = WriterHandle
+data WriterHandle (f :: Type -> Type) = WriterHandle
   { hPayload :: Handle
   , hOffset :: Handle
-  , hIndices :: f Handle
   , vOffset :: MVar (Int, Int64)
   }
 
@@ -51,14 +50,12 @@ openWriter idents path = do
   writeFile indexPath $ unlines $ toList idents
   hPayload <- openFile payloadPath AppendMode
   hOffset <- openFile offsetPath AppendMode
-  hIndices <- forM idents $ \s -> openFile (indexPath ++ "." ++ s) AppendMode
   return WriterHandle{..}
 
 closeWriter :: Foldable f => WriterHandle f -> IO ()
 closeWriter WriterHandle{..} = do
   hClose hPayload
   hClose hOffset
-  mapM_ hClose hIndices
 
 withWriter :: (Traversable f, Applicative f) => f String -> FilePath -> (WriterHandle f -> IO a) -> IO a
 withWriter idents path = bracket (openWriter idents path) closeWriter
@@ -73,10 +70,8 @@ write h ixs bs = writeMany h $ \f -> f ixs bs
 -- | Write zero or more items and flush the change. The writing function must be
 -- called from one thread.
 writeMany :: (Foldable f, Applicative f) => WriterHandle f
-  -> ((f Int64 -- ^ index values
-    -> B.ByteString -- ^ payload
-    -> IO Int -- ^ sequential number
-    ) -> IO r)
+  -> ((f Int64  -> B.ByteString -> IO Int) -> IO r)
+  -- ^ index values -> payload -> sequential number
   -> IO r
 writeMany WriterHandle{..} cont = do
 
@@ -84,12 +79,10 @@ writeMany WriterHandle{..} cont = do
 
   let step ixs bs = modifyMVar vOffset $ \(n, ofs) -> do
         let len = fromIntegral (B.length bs)
-        let ofs' = ofs + len + 8 * fromIntegral (length ixs + 1)
-        BB.hPutBuilder hPayload $ BB.int64LE len
-          <> foldMap BB.int64LE ixs
-          <> BB.byteString bs
-        sequence_ $ liftA2 (\h -> BB.hPutBuilder h . BB.int64LE) hIndices ixs
-        modifyIORef' vOffsets (<>BB.int64LE ofs')
+        let ofs' = ofs + len
+        B.hPutStr hPayload bs
+        let ibody = BB.int64LE ofs' <> foldMap BB.int64LE ixs
+        modifyIORef' vOffsets (<>ibody)
         let !n' = n + 1
         return ((n', ofs'), n)
 
@@ -99,6 +92,5 @@ writeMany WriterHandle{..} cont = do
     -- Because of this, offsets are buffered in an IORef to prevent them from
     -- getting partially written.
     hFlush hPayload
-    mapM_ hFlush hIndices
     readIORef vOffsets >>= BB.hPutBuilder hOffset
     hFlush hOffset

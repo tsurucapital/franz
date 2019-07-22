@@ -11,6 +11,8 @@ import Data.Serialize
 import qualified Data.ByteString.Char8 as B
 import qualified Data.HashMap.Strict as HM
 import qualified Data.IntMap.Strict as IM
+import qualified Data.Vector.Unboxed as U
+import qualified Data.Vector as V
 import Data.Maybe (isJust)
 import GHC.Clock (getMonotonicTime)
 import GHC.Generics (Generic)
@@ -22,25 +24,29 @@ import System.FSNotify
 data RequestType = AllItems | LastItem deriving (Show, Generic)
 instance Serialize RequestType
 
+data ItemRef = BySeqNum !Int -- ^ sequential number
+  | ByIndex !B.ByteString !Int -- ^ index name and value
+  deriving (Show, Generic)
+instance Serialize ItemRef
+
 data Query = Query
   { reqStream :: !B.ByteString
-  , reqFromIndex :: !(Maybe B.ByteString)
-  , reqToIndex :: !(Maybe B.ByteString)
+  , reqFrom :: !ItemRef -- ^ name of the index to search
+  , reqTo :: !ItemRef -- ^ name of the index to search
   , reqType :: !RequestType
-  , reqFrom :: !Int
-  , reqTo :: !Int
   } deriving (Show, Generic)
 instance Serialize Query
 
 data Stream = Stream
-  { vOffsets :: TVar (IM.IntMap Int)
-  , indexNames :: [B.ByteString]
-  , indices :: HM.HashMap B.ByteString (TVar (IM.IntMap Int))
-  , vCount :: TVar Int
-  , vCaughtUp :: TVar Bool
-  , followThread :: ThreadId
-  , payloadHandle :: Handle
-  , vActivity :: TVar Activity
+  { vOffsets :: !(TVar (IM.IntMap Int))
+  , indexNames :: ![B.ByteString]
+  , indices :: !(HM.HashMap B.ByteString (TVar (IM.IntMap Int)))
+  , vCount :: !(TVar Int)
+  , vCaughtUp :: !(TVar Bool)
+  , followThread :: !ThreadId
+  , indexHandle :: !Handle
+  , payloadHandle :: !Handle
+  , vActivity :: !(TVar Activity)
   }
 
 type Activity = Either Double Int
@@ -49,10 +55,10 @@ addActivity :: Activity -> Activity
 addActivity (Left _) = Right 0
 addActivity (Right n) = Right (n + 1)
 
-removeActivity :: IO (Activity -> Activity)
-removeActivity = do
+removeActivity :: Stream -> IO ()
+removeActivity str = do
   now <- getMonotonicTime
-  return $ \case
+  atomically $ modifyTVar' (vActivity str) $ \case
     Left _ -> Left now
     Right n
       | n <= 0 -> Left now
@@ -69,45 +75,43 @@ createStream man path = do
   unless exist $ throwIO $ StreamNotFound offsetPath
   initialOffsetsBS <- B.readFile offsetPath
   payloadHandle <- openBinaryFile payloadPath ReadMode
-  let getInts bs = either (throwIO . InternalError) pure
-        $ runGet (replicateM (B.length bs `div` 8) (fromIntegral <$> getInt64le)) bs
-  initialOffsets <- IM.fromList . zip [0..] <$> getInts initialOffsetsBS
-  vOffsets <- newTVarIO initialOffsets
+  indexNames <- B.lines <$> B.readFile (path </> "indices")
+  let icount = 1 + length indexNames
+  let count = B.length initialOffsetsBS `div` (8 * icount)
+  let getI = fromIntegral <$> getInt64le
+  initialIndices <- either (throwIO . InternalError) pure
+    $ runGet (V.replicateM count $ U.replicateM icount getI) initialOffsetsBS
+  let initialOffsets = IM.fromList $ V.toList
+        $ V.zip (V.enumFromN 0 count) $ V.map U.head initialIndices
+  vOffsets <- newTVarIO $! initialOffsets
   vCaughtUp <- newTVarIO False
-  vCount <- newTVarIO $ IM.size initialOffsets
+  vCount <- newTVarIO $! IM.size initialOffsets
   _ <- watchDir man path (\case
     Modified p _ _ | p == offsetPath -> True
     _ -> False)
     $ const $ atomically $ writeTVar vCaughtUp False
 
-  indexNames <- B.lines <$> B.readFile (path </> "indices")
-  vIndices <- forM indexNames $ \name -> do
-    let indexPath = path </> "indices" ++ "." ++ B.unpack name
-    initial <- B.readFile indexPath >>= getInts
-    newTVarIO $ IM.fromList $ zip initial [0..]
+  vIndices <- forM [1..length indexNames] $ \i -> newTVarIO
+    $ IM.fromList $ V.toList $ V.zip (V.map (U.! i) initialIndices) (V.enumFromN 0 count)
 
-  followThread <- forkIO $ withFile offsetPath ReadMode $ \h -> do
-    forM_ (IM.maxViewWithKey initialOffsets) $ \((i, ofs), _) -> do
-      hSeek h AbsoluteSeek $ fromIntegral $ succ i * 8
-      hSeek payloadHandle AbsoluteSeek $ fromIntegral ofs
+  indexHandle <- openFile offsetPath ReadMode
+
+  -- TODO broadcast an exception if it exits?
+  followThread <- forkIO $ do
+    forM_ (IM.maxViewWithKey initialOffsets) $ \((i, _), _) -> do
+      hSeek indexHandle AbsoluteSeek $ fromIntegral $ succ i * icount * 8
     forever $ do
-      bs <- B.hGet h 8
+      bs <- B.hGet indexHandle (8 * icount)
       if B.null bs
         then do
           atomically $ writeTVar vCaughtUp True
           atomically $ readTVar vCaughtUp >>= check . not
         else do
-          ofs <- either (throwIO . InternalError) (pure . fromIntegral) $ runGet getInt64le bs
-          header <- B.hGet payloadHandle $ 8 * (length indexNames + 1)
-          (len, indices) <- either (throwIO . InternalError) pure $ flip runGet header $ (,)
-            <$> getInt64le
-            <*> traverse (const getInt64le) indexNames
-          hSeek payloadHandle RelativeSeek $ fromIntegral len
+          ofs : indices <- either (throwIO . InternalError) pure $ runGet (replicateM icount getI) bs
           atomically $ do
             i <- readTVar vCount
             modifyTVar' vOffsets $ IM.insert i ofs
-            forM_ (zip vIndices indices) $ \(v, x) -> do
-              modifyTVar' v $ IM.insert (fromIntegral x) i
+            forM_ (zip vIndices indices) $ \(v, x) -> modifyTVar' v $ IM.insert (fromIntegral x) i
             writeTVar vCount $! i + 1
 
   let indices = HM.fromList $ zip indexNames vIndices
@@ -179,12 +183,12 @@ withFranzReader prefix k = do
 handleQuery :: FranzReader
   -> FilePath
   -> Query
-  -> IO (STM (Bool, Handle, [B.ByteString], QueryResult, IO ()))
-handleQuery FranzReader{..} dir (Query name bindex_ eindex_ rt begin_ end_) = do
+  -> IO (STM (Stream, Bool, QueryResult))
+handleQuery FranzReader{..} dir (Query name begin_ end_ rt) = do
   streams <- atomically $ readTVar vStreams
   let path = prefix </> dir </> B.unpack name
   let streamId = B.pack dir <> name
-  Stream{..} <- case HM.lookup streamId streams of
+  stream@Stream{..} <- case HM.lookup streamId streams of
     Nothing -> do
       s <- createStream watchManager path
       atomically $ modifyTVar' vStreams $ HM.insert streamId s
@@ -200,23 +204,22 @@ handleQuery FranzReader{..} dir (Query name bindex_ eindex_ rt begin_ end_) = do
     let rotate i
           | i < 0 = finalOffset + i
           | otherwise = i
-    begin <- case bindex_ of
-      Nothing -> pure $ rotate begin_
-      Just index -> case HM.lookup index indices of
+    begin <- case begin_ of
+      BySeqNum i -> pure $ rotate i
+      ByIndex index val -> case HM.lookup index indices of
         Nothing -> throwSTM $ IndexNotFound index $ HM.keys indices
         Just v -> do
           m <- readTVar v
-          let (_, wing) = splitR begin_ m
+          let (_, wing) = splitR val m
           return $! maybe maxBound fst $ IM.minView wing
-    end <- case eindex_ of
-      Nothing -> pure $ rotate end_
-      Just index -> case HM.lookup index indices of
+    end <- case end_ of
+      BySeqNum i -> pure $ rotate i
+      ByIndex index val -> case HM.lookup index indices of
         Nothing -> throwSTM $ IndexNotFound index $ HM.keys indices
         Just v -> do
           m <- readTVar v
-          let (body, lastItem, _) = IM.splitLookup end_ m
-          let body' = maybe id (IM.insert end_) lastItem body
+          let (body, lastItem, _) = IM.splitLookup val m
+          let body' = maybe id (IM.insert val) lastItem body
           return $! maybe minBound fst $ IM.maxView body'
     let (ready, result) = range begin end rt allOffsets
-    let reset = removeActivity >>= atomically . modifyTVar' vActivity
-    return (ready, payloadHandle, indexNames, result, reset)
+    return (stream, ready, result)

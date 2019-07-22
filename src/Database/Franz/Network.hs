@@ -10,6 +10,7 @@ module Database.Franz.Network
   , connect
   , disconnect
   , Query(..)
+  , ItemRef(..)
   , RequestType(..)
   , defQuery
   , Response
@@ -35,6 +36,7 @@ import Data.Int (Int64)
 import Data.Serialize
 import qualified Data.ByteString.Char8 as B
 import qualified Data.HashMap.Strict as HM
+import qualified Data.Vector as V
 import GHC.Generics (Generic)
 import qualified Network.Socket.SendFile.Handle as SF
 import qualified Network.Socket.ByteString as SB
@@ -61,17 +63,26 @@ data ResponseHeader = ResponseInstant !ResponseId
     deriving (Show, Generic)
 instance Serialize ResponseHeader
 
+-- | Initial seqno, final seqno, base offset, index names
+data PayloadHeader = PayloadHeader !Int !Int !Int ![B.ByteString]
+
+instance Serialize PayloadHeader where
+  put (PayloadHeader s t u xs) = f s *> f t *> f u *> put xs where
+    f = putInt64le . fromIntegral
+  get = PayloadHeader <$> f <*> f <*> f <*> get where
+    f = fromIntegral <$> getInt64le
+
 respond :: FranzReader -> IORef (IM.IntMap ThreadId) -> B.ByteString -> IORef B.ByteString -> S.Socket -> IO ()
 respond env refThreads (B.unpack -> path) buf conn = runGetRecv buf conn get >>= \case
   Right (RawRequest reqId req) -> do
     query <- handleQuery env path req
     join $ atomically $ do
-      (ready, h, names, offsets, reset) <- query
+      (stream, ready, offsets) <- query
       return $ if ready
         then do
           sendHeader $ ResponseInstant reqId
-          send h names offsets
-          reset
+          send stream offsets
+          removeActivity stream
         else do
           m <- readIORef refThreads
           if IM.member reqId m
@@ -80,12 +91,12 @@ respond env refThreads (B.unpack -> path) buf conn = runGetRecv buf conn get >>=
               sendHeader $ ResponseWait reqId
               -- Fork a thread to send a delayed response
               tid <- forkIO $ join $ atomically $ do
-                (ready', h', names', offsets', _) <- query
+                (stream', ready', offsets') <- query
                 check ready'
                 return $ do
                   sendHeader $ ResponseDelayed reqId
-                  send h' names' offsets'
-                  reset
+                  send stream' offsets'
+                  removeActivity stream'
               writeIORef refThreads $! IM.insert reqId tid m
   Right (RawClean reqId) -> do
     m <- readIORef refThreads
@@ -94,9 +105,11 @@ respond env refThreads (B.unpack -> path) buf conn = runGetRecv buf conn get >>=
   Left err -> throwIO $ MalformedRequest err
   where
     sendHeader = SB.sendAll conn . encode
-    send h names ((s0, p0), (s1, p1)) = do
-      SB.sendAll conn $ encode (s0, s1, names)
-      SF.sendFile' conn h (fromIntegral p0) (fromIntegral $ p1 - p0)
+    send Stream{..} ((s0, p0), (s1, p1)) = do
+      SB.sendAll conn $ encode $ PayloadHeader s0 s1 p0 indexNames
+      let siz = 8 * (length indexNames + 1)
+      SF.sendFile' conn indexHandle (fromIntegral $ siz * succ s0) (fromIntegral $ siz * (s1 - s0))
+      SF.sendFile' conn payloadHandle (fromIntegral p0) (fromIntegral $ p1 - p0)
 
 startServer
     :: Double -- reaping interval
@@ -166,12 +179,23 @@ startServer interval life port lprefix aprefix = withFranzReader lprefix $ \env 
             Right _ -> return ()
           S.close conn
 
--- The protocol for connection
+-- The protocol
 --
--- Client: Let P be an archive prefix. Send P
--- Server: Receive P. If P exists, mount it. Send "READY" and start a loop.
---         If it doesn't, look for a live stream prefixed by P.
--- Client: Receive "READY"
+-- Client                     Server
+---  | ---- Archive prefix ---> |  Mounts P if possible
+---  | <--- apiVersion -------- |
+---  | ---- RawRequest i p ---> |
+---  | ---- RawRequest j q ---> |
+---  | ---- RawRequest k r ---> |
+---  | <--- ResponseInstant i - |
+---  | <--- result for p -----  |
+---  | <--- ResponseWait j ---- |
+---  | <--- ResponseWait k ---- |
+---  | <--- ResponseDelayed j - |
+---  | <--- result for q -----  |
+--   | ----  RawClean i ---->   |
+--   | ----  RawClean j ---->   |
+--   | ----  RawClean k ---->   |
 
 data Connection = Connection
   { connSocket :: MVar S.Socket
@@ -259,15 +283,14 @@ runGetRecv refBuf sock m = do
 defQuery :: B.ByteString -> Query
 defQuery name = Query
   { reqStream = name
-  , reqFromIndex = Nothing
-  , reqToIndex = Nothing
-  , reqFrom = 0
-  , reqTo = 0
+  , reqFrom = BySeqNum 0
+  , reqTo = BySeqNum 0
   , reqType = AllItems
   }
 
 type SomeIndexMap = HM.HashMap B.ByteString Int64
 
+-- | (seqno, indices, payloads)
 type Contents = [(Int, SomeIndexMap, B.ByteString)]
 
 -- | When it is 'Right', it might block until the content arrives.
@@ -278,12 +301,17 @@ awaitResponse = (>>=either pure id)
 
 getResponse :: Get Contents
 getResponse = do
-  (s0, s1, names) <- get
-  forM [s0+1..s1] $ \i -> do
-    len <- getInt64le
-    ixs <- traverse (\k -> (,) k <$> getInt64le) names
-    bs <- getByteString (fromIntegral len)
-    return (i, HM.fromList ixs, bs)
+  PayloadHeader s0 s1 p0 names <- get
+  ixs <- V.replicateM (s1 - s0) $ (,) <$> fmap fromIntegral getInt64le <*> traverse (const getInt64le) names
+  let ofss = V.cons p0 $ V.map fst ixs
+  payload <- getByteString $ fromIntegral $ V.last ofss - p0
+  return $ do
+    i <- [0..s1-s0-1]
+    let ofs0 = maybe (error "ofs0") id $ ofss V.!? i
+    let ofs1 = maybe (error "ofs1") fst $ ixs V.!? i
+    let indices = maybe (error "indices") snd $ ixs V.!? i
+    pure (s0 + i + 1, HM.fromList $ zip names indices, B.take (ofs1 - ofs0) $ B.drop (ofs0 - p0) payload)
+
 
 -- | Fetch requested data from the server.
 -- Termination of the continuation cancels the request, allowing flexible
@@ -338,7 +366,7 @@ fetchTraverse conn reqs = runContT $ do
       Just instant -> return $ Left instant
       Nothing -> return $ Right $ traverse (either pure id) resps
 
--- | Send a single query and wait for the result.
+-- | Send a single query and wait for the result. If it timeouts, it returns an empty list.
 fetchSimple :: Connection
   -> Int -- ^ timeout in microseconds
   -> Query
