@@ -72,44 +72,45 @@ instance Serialize PayloadHeader where
   get = PayloadHeader <$> f <*> f <*> f <*> get where
     f = fromIntegral <$> getInt64le
 
-respond :: FranzReader -> IORef (IM.IntMap ThreadId) -> B.ByteString -> IORef B.ByteString -> S.Socket -> IO ()
-respond env refThreads (B.unpack -> path) buf conn = runGetRecv buf conn get >>= \case
-  Right (RawRequest reqId req) -> do
-    query <- handleQuery env path req
-    join $ atomically $ do
-      (stream, ready, offsets) <- query
-      return $ if ready
-        then do
-          sendHeader $ ResponseInstant reqId
-          send stream offsets
-          removeActivity stream
-        else do
-          m <- readIORef refThreads
-          if IM.member reqId m
-            then sendHeader $ ResponseError reqId $ MalformedRequest "duplicate request ID"
-            else do
-              sendHeader $ ResponseWait reqId
-              -- Fork a thread to send a delayed response
-              tid <- forkIO $ join $ atomically $ do
-                (stream', ready', offsets') <- query
-                check ready'
-                return $ do
-                  sendHeader $ ResponseDelayed reqId
-                  send stream' offsets'
-                  removeActivity stream'
-              writeIORef refThreads $! IM.insert reqId tid m
-  Right (RawClean reqId) -> do
-    m <- readIORef refThreads
-    mapM_ killThread $ IM.lookup reqId m
-    writeIORef refThreads $! IM.delete reqId m
-  Left err -> throwIO $ MalformedRequest err
+respond :: FranzReader
+  -> IORef (IM.IntMap ThreadId)
+  -> B.ByteString
+  -> IORef B.ByteString
+  -> MVar S.Socket -> IO ()
+respond env refThreads (B.unpack -> path) buf vConn = do
+  recvConn <- readMVar vConn
+  runGetRecv buf recvConn get >>= \case
+    Right (RawRequest reqId req) -> do
+      query <- handleQuery env path req
+      join $ atomically $ do
+        (stream, ready, offsets) <- query
+        return $ if ready
+          then send (ResponseInstant reqId) stream offsets
+          else do
+            m <- readIORef refThreads
+            if IM.member reqId m
+              then sendHeader $ ResponseError reqId $ MalformedRequest "duplicate request ID"
+              else do
+                sendHeader $ ResponseWait reqId
+                -- Fork a thread to send a delayed response
+                tid <- forkIO $ join $ atomically $ do
+                  (stream', ready', offsets') <- query
+                  check ready'
+                  return $ send (ResponseDelayed reqId) stream' offsets'
+                writeIORef refThreads $! IM.insert reqId tid m
+    Right (RawClean reqId) -> do
+      m <- readIORef refThreads
+      mapM_ killThread $ IM.lookup reqId m
+      writeIORef refThreads $! IM.delete reqId m
+    Left err -> throwIO $ MalformedRequest err
   where
-    sendHeader = SB.sendAll conn . encode
-    send Stream{..} ((s0, p0), (s1, p1)) = do
-      SB.sendAll conn $ encode $ PayloadHeader s0 s1 p0 indexNames
+    sendHeader x = withMVar vConn $ \conn -> SB.sendAll conn $ encode x
+    send header stream@Stream{..} ((s0, p0), (s1, p1)) = withMVar vConn $ \conn -> do
+      SB.sendAll conn $ encode (header, PayloadHeader s0 s1 p0 indexNames)
       let siz = 8 * (length indexNames + 1)
       SF.sendFile' conn indexHandle (fromIntegral $ siz * succ s0) (fromIntegral $ siz * (s1 - s0))
       SF.sendFile' conn payloadHandle (fromIntegral p0) (fromIntegral $ p1 - p0)
+      removeActivity stream
 
 startServer
     :: Double -- reaping interval
@@ -138,7 +139,8 @@ startServer interval life port lprefix aprefix = withFranzReader lprefix $ \env 
             SB.sendAll conn apiVersion
             ref <- newIORef IM.empty
             buf <- newIORef B.empty
-            forever (respond env ref path buf conn) `finally` do
+            vConn <- newMVar conn
+            forever (respond env ref path buf vConn) `finally` do
               readIORef ref >>= mapM_ killThread
 
       forkFinally (do
