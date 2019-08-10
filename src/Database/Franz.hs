@@ -8,7 +8,8 @@ module Database.Franz (
     closeWriter,
     withWriter,
     write,
-    writeMany
+    writeMany,
+    getLastSeqNo
     ) where
 
 import Control.Concurrent
@@ -29,7 +30,11 @@ data WriterHandle (f :: Type -> Type) = WriterHandle
   , vOffset :: MVar (Int, Int64)
   }
 
-openWriter :: (Traversable f, Applicative f)
+-- | Get the sequential number of the last item item written.
+getLastSeqNo :: WriterHandle f -> IO Int
+getLastSeqNo = fmap (subtract 1 . fst) . readMVar . vOffset
+
+openWriter :: Foldable f
   => f String
   -- ^ index names: a fixed-length collection of the names of indices for this stream.
   -- Use Proxy if you don't want any indices. If you want only one type of index, use `Identity ""`.
@@ -57,19 +62,19 @@ closeWriter WriterHandle{..} = do
   hClose hPayload
   hClose hOffset
 
-withWriter :: (Traversable f, Applicative f) => f String -> FilePath -> (WriterHandle f -> IO a) -> IO a
+withWriter :: Foldable f => f String -> FilePath -> (WriterHandle f -> IO a) -> IO a
 withWriter idents path = bracket (openWriter idents path) closeWriter
 
-write :: (Foldable f, Applicative f) => WriterHandle f
+write :: Foldable f => WriterHandle f
   -> f Int64 -- ^ index values
   -> B.ByteString -- ^ payload
   -> IO Int
-write h ixs bs = writeMany h $ \f -> f ixs bs
+write h ixs !bs = writeMany h $ \f -> f ixs bs
 {-# INLINE write #-}
 
 -- | Write zero or more items and flush the change. The writing function must be
 -- called from one thread.
-writeMany :: (Foldable f, Applicative f) => WriterHandle f
+writeMany :: Foldable f => WriterHandle f
   -> ((f Int64  -> B.ByteString -> IO Int) -> IO r)
   -- ^ index values -> payload -> sequential number
   -> IO r
@@ -77,7 +82,7 @@ writeMany WriterHandle{..} cont = do
 
   vOffsets <- newIORef mempty
 
-  let step ixs bs = modifyMVar vOffset $ \(n, ofs) -> do
+  let step ixs !bs = modifyMVar vOffset $ \(n, ofs) -> do
         let len = fromIntegral (B.length bs)
         let ofs' = ofs + len
         B.hPutStr hPayload bs
