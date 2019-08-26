@@ -8,26 +8,33 @@ module Database.Franz (
     closeWriter,
     withWriter,
     write,
-    writeMany,
+    flush,
     getLastSeqNo
     ) where
 
 import Control.Concurrent
 import Control.Exception
-import qualified Data.ByteString.Builder as BB
-import qualified Data.ByteString.Char8 as B
+import Control.Monad
+import qualified Data.ByteString.FastBuilder as BB
+import qualified Data.Vector.Storable.Mutable as MV
 import Data.Foldable (toList)
 import Data.Int
+import Data.Word (Word64)
 import Data.IORef
 import Data.Kind (Type)
+import GHC.IO.Handle.FD (openFileBlocking)
 import System.Directory
+import System.Endian (toLE64)
 import System.FilePath
 import System.IO
 
 data WriterHandle (f :: Type -> Type) = WriterHandle
   { hPayload :: Handle
   , hOffset :: Handle
-  , vOffset :: MVar (Int, Int64)
+  , vOffset :: MVar (Int, Word64)
+  , offsetBuf :: MV.IOVector Word64
+  , offsetPtr :: IORef Int
+  , indexCount :: Int
   }
 
 -- | Get the sequential number of the last item item written.
@@ -53,49 +60,65 @@ openWriter idents path = do
       newMVar (fromIntegral count `div` 8, fromIntegral size)
     else newMVar (0,0)
   writeFile indexPath $ unlines $ toList idents
-  hPayload <- openFile payloadPath AppendMode
-  hOffset <- openFile offsetPath AppendMode
+  hPayload <- openFileBlocking payloadPath AppendMode
+  hOffset <- openFileBlocking offsetPath AppendMode
+  offsetBuf <- MV.new offsetBufferSize
+  offsetPtr <- newIORef 0
+  let indexCount = length idents + 1
   return WriterHandle{..}
 
 closeWriter :: Foldable f => WriterHandle f -> IO ()
-closeWriter WriterHandle{..} = do
+closeWriter h@WriterHandle{..} = do
+  flush h
   hClose hPayload
   hClose hOffset
 
 withWriter :: Foldable f => f String -> FilePath -> (WriterHandle f -> IO a) -> IO a
 withWriter idents path = bracket (openWriter idents path) closeWriter
 
-write :: Foldable f => WriterHandle f
+offsetBufferSize :: Int
+offsetBufferSize = 256
+
+write :: Foldable f
+  => WriterHandle f
   -> f Int64 -- ^ index values
-  -> B.ByteString -- ^ payload
+  -> BB.Builder -- ^ payload
   -> IO Int
-write h ixs !bs = writeMany h $ \f -> f ixs bs
+write h@WriterHandle{..} ixs !bs = modifyMVar vOffset $ \(n, ofs) -> do
+  len <- fromIntegral <$> BB.hPutBuilderLen hPayload bs
+  let ofs' = ofs + len
+
+  let go :: Int -> IO ()
+      go i0 = do
+        MV.write offsetBuf i0 $ toLE64 $ fromIntegral ofs'
+        forM_ (zip [i0+1..] (toList ixs))
+          $ \(i, v) -> MV.write offsetBuf i $ toLE64 $ fromIntegral v
+
+  pos <- readIORef offsetPtr
+  if pos + indexCount >= offsetBufferSize
+    then do
+      unsafeFlush h
+      go 0
+      writeIORef offsetPtr indexCount
+    else do
+      go pos
+      writeIORef offsetPtr (pos + indexCount)
+  let !n' = n + 1
+  return ((n', ofs'), n)
 {-# INLINE write #-}
 
--- | Write zero or more items and flush the change. The writing function must be
--- called from one thread.
-writeMany :: Foldable f => WriterHandle f
-  -> ((f Int64  -> B.ByteString -> IO Int) -> IO r)
-  -- ^ index values -> payload -> sequential number
-  -> IO r
-writeMany WriterHandle{..} cont = do
+-- | Flush the changes.
+flush :: WriterHandle f -> IO ()
+flush h = withMVar (vOffset h) $ const $ unsafeFlush h
 
-  vOffsets <- newIORef mempty
-
-  let step ixs !bs = modifyMVar vOffset $ \(n, ofs) -> do
-        let len = fromIntegral (B.length bs)
-        let ofs' = ofs + len
-        B.hPutStr hPayload bs
-        let ibody = BB.int64LE ofs' <> foldMap BB.int64LE ixs
-        modifyIORef' vOffsets (<>ibody)
-        let !n' = n + 1
-        return ((n', ofs'), n)
-
-  cont step `finally` do
-    -- NB it's important to write the payload and indices prior to offsets
-    -- because the reader watches the offset file then consume other files.
-    -- Because of this, offsets are buffered in an IORef to prevent them from
-    -- getting partially written.
+unsafeFlush :: WriterHandle f -> IO ()
+unsafeFlush WriterHandle{..}  = do
+  -- NB it's important to write the payload and indices prior to offsets
+  -- because the reader watches the offset file then consume other files.
+  -- Because of this, offsets are buffered in a buffer.
+  len <- readIORef offsetPtr
+  when (len > 0) $ do
     hFlush hPayload
-    readIORef vOffsets >>= BB.hPutBuilder hOffset
+    MV.unsafeWith offsetBuf $ \ptr -> hPutBuf hOffset ptr (len * 8)
+    writeIORef offsetPtr 0
     hFlush hOffset

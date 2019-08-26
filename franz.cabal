@@ -38,7 +38,9 @@ library
     , bytestring
     , cereal
     , containers
+    , cpu
     , directory
+    , fast-builder >= 0.1.1.0
     , filepath
     , fsnotify
     , network

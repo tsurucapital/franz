@@ -185,7 +185,7 @@ handleQuery :: FranzReader
   -> Query
   -> IO (STM (Stream, Bool, QueryResult))
 handleQuery FranzReader{..} dir (Query name begin_ end_ rt) = do
-  streams <- atomically $ readTVar vStreams
+  streams <- readTVarIO vStreams
   let path = prefix </> dir </> B.unpack name
   let streamId = B.pack dir <> name
   stream@Stream{..} <- case HM.lookup streamId streams of

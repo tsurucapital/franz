@@ -177,7 +177,7 @@ startServer interval life port lprefix aprefix = withFranzReader lprefix $ \env 
           case result of
             Left ex -> case fromException ex of
               Just e -> SB.sendAll conn $ encode $ ResponseError (-1) e
-              Nothing -> hPutStrLn stderr $ show ex
+              Nothing -> hPrint stderr ex
             Right _ -> return ()
           S.close conn
 
