@@ -1,6 +1,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Database.Franz (
     -- * Writer interface
     WriterHandle,
@@ -22,6 +23,8 @@ import Data.Int
 import Data.Word (Word64)
 import Data.IORef
 import Data.Kind (Type)
+import Foreign.Ptr (Ptr)
+import Foreign.Storable (Storable(..))
 import GHC.IO.Handle.FD (openFileBlocking)
 import System.Directory
 import System.Endian (toLE64)
@@ -30,11 +33,11 @@ import System.IO
 
 data WriterHandle (f :: Type -> Type) = WriterHandle
   { hPayload :: Handle
-  , hOffset :: Handle
-  , vOffset :: MVar (Int, Word64)
-  , offsetBuf :: MV.IOVector Word64
-  , offsetPtr :: IORef Int
-  , indexCount :: Int
+  , hOffset :: Handle -- ^ Handle for offsets and indices
+  , vOffset :: MVar (Int, Word64) -- ^ (next sequential number, current payload file size)
+  , offsetBuf :: MV.IOVector Word64 -- ^ pending indices
+  , offsetPtr :: IORef Int -- ^ the number of pending indices
+  , indexCount :: Int -- ^ the number of Word64s to write for item
   }
 
 -- | Get the sequential number of the last item item written.
@@ -60,6 +63,9 @@ openWriter idents path = do
       newMVar (fromIntegral count `div` 8, fromIntegral size)
     else newMVar (0,0)
   writeFile indexPath $ unlines $ toList idents
+  -- Open the file in blocking mode because a write on a non-blocking
+  -- FD makes use of an unsafe call to write(2), which in turn blocks other
+  -- threads when GC runs.
   hPayload <- openFileBlocking payloadPath AppendMode
   hOffset <- openFileBlocking offsetPath AppendMode
   offsetBuf <- MV.new offsetBufferSize
@@ -67,6 +73,7 @@ openWriter idents path = do
   let indexCount = length idents + 1
   return WriterHandle{..}
 
+-- | Flush any pending data and close a 'WriterHandle'.
 closeWriter :: Foldable f => WriterHandle f -> IO ()
 closeWriter h@WriterHandle{..} = do
   flush h
@@ -87,22 +94,15 @@ write :: Foldable f
 write h@WriterHandle{..} ixs !bs = modifyMVar vOffset $ \(n, ofs) -> do
   len <- fromIntegral <$> BB.hPutBuilderLen hPayload bs
   let ofs' = ofs + len
-
-  let go :: Int -> IO ()
-      go i0 = do
-        MV.write offsetBuf i0 $ toLE64 $ fromIntegral ofs'
-        forM_ (zip [i0+1..] (toList ixs))
-          $ \(i, v) -> MV.write offsetBuf i $ toLE64 $ fromIntegral v
-
   pos <- readIORef offsetPtr
-  if pos + indexCount >= offsetBufferSize
-    then do
-      unsafeFlush h
-      go 0
-      writeIORef offsetPtr indexCount
-    else do
-      go pos
-      writeIORef offsetPtr (pos + indexCount)
+  pos' <- if pos + indexCount >= offsetBufferSize
+    then 0 <$ unsafeFlush h
+    else return pos
+  MV.write offsetBuf pos' $ toLE64 $ fromIntegral ofs'
+  forM_ (zip [pos'+1..] (toList ixs))
+    $ \(i, v) -> MV.write offsetBuf i $ toLE64 $ fromIntegral v
+  writeIORef offsetPtr (pos' + indexCount)
+
   let !n' = n + 1
   return ((n', ofs'), n)
 {-# INLINE write #-}
@@ -111,6 +111,7 @@ write h@WriterHandle{..} ixs !bs = modifyMVar vOffset $ \(n, ofs) -> do
 flush :: WriterHandle f -> IO ()
 flush h = withMVar (vOffset h) $ const $ unsafeFlush h
 
+-- | Flush the change without locking 'vOffset'
 unsafeFlush :: WriterHandle f -> IO ()
 unsafeFlush WriterHandle{..}  = do
   -- NB it's important to write the payload and indices prior to offsets
@@ -119,6 +120,12 @@ unsafeFlush WriterHandle{..}  = do
   len <- readIORef offsetPtr
   when (len > 0) $ do
     hFlush hPayload
-    MV.unsafeWith offsetBuf $ \ptr -> hPutBuf hOffset ptr (len * 8)
+    MV.unsafeWith offsetBuf $ \ptr -> hPutElems hOffset ptr len
     writeIORef offsetPtr 0
     hFlush hOffset
+
+-- | Same as hPutBuf but with a number of elements to write instead of a number
+-- of bytes.
+hPutElems :: forall a. Storable a => Handle -> Ptr a -> Int -> IO ()
+hPutElems hdl ptr len = hPutBuf hdl ptr (len * sizeOf (undefined :: a))
+{-# INLINE hPutElems #-}
