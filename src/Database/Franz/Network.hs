@@ -121,6 +121,7 @@ startServer
     -> IO ()
 startServer interval life port lprefix aprefix = withFranzReader lprefix $ \env -> do
 
+  hSetBuffering stderr LineBuffering
   _ <- forkIO $ reaper interval life env
 
   vMountCount <- newTVarIO (HM.empty :: HM.HashMap B.ByteString Int)
@@ -133,10 +134,10 @@ startServer interval life port lprefix aprefix = withFranzReader lprefix $ \env 
     S.listen sock S.maxListenQueue
 
     forever $ do
-      (conn, _) <- S.accept sock
-
+      (conn, connAddr) <- S.accept sock
       let respondLoop path = do
             SB.sendAll conn apiVersion
+            hPutStrLn stderr $ unwords ["[server]", show connAddr, show path]
             ref <- newIORef IM.empty
             buf <- newIORef B.empty
             vConn <- newMVar conn
@@ -177,9 +178,11 @@ startServer interval life port lprefix aprefix = withFranzReader lprefix $ \env 
           case result of
             Left ex -> case fromException ex of
               Just e -> SB.sendAll conn $ encode $ ResponseError (-1) e
-              Nothing -> hPrint stderr ex
+              Nothing -> logServer [show ex]
             Right _ -> return ()
           S.close conn
+  where
+    logServer = hPutStrLn stderr . unwords . (:) "[server]"
 
 -- The protocol
 --

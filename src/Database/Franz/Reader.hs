@@ -13,6 +13,7 @@ import qualified Data.HashMap.Strict as HM
 import qualified Data.IntMap.Strict as IM
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector as V
+import Data.Void
 import Data.Maybe (isJust)
 import GHC.Clock (getMonotonicTime)
 import GHC.Generics (Generic)
@@ -96,8 +97,12 @@ createStream man path = do
 
   indexHandle <- openFile offsetPath ReadMode
 
+  let final :: Either SomeException Void -> IO ()
+      final (Left exc) = logFollower [path, "terminated with", show exc]
+      final (Right v) = absurd v
+
   -- TODO broadcast an exception if it exits?
-  followThread <- forkIO $ do
+  followThread <- flip forkFinally final $ do
     forM_ (IM.maxViewWithKey initialOffsets) $ \((i, _), _) -> do
       hSeek indexHandle AbsoluteSeek $ fromIntegral $ succ i * icount * 8
     forever $ do
@@ -116,8 +121,12 @@ createStream man path = do
 
   let indices = HM.fromList $ zip indexNames vIndices
 
+  logFollower ["started", path]
+
   vActivity <- getMonotonicTime >>= newTVarIO . Left
   return Stream{..}
+  where
+    logFollower = hPutStrLn stderr . unwords . (:) "[follower]"
 
 type QueryResult = ((Int, Int) -- starting SeqNo, byte offset
     , (Int, Int)) -- ending SeqNo, byte offset
@@ -164,15 +173,21 @@ reaper :: Double -- interval
   -> FranzReader -> IO ()
 reaper int life FranzReader{..} = forever $ do
   now <- getMonotonicTime
-  xs <- atomically $ do
+  (count, xs) <- atomically $ do
     list <- newTVar []
     m <- readTVar vStreams
     m' <- forM m $ \s -> readTVar (vActivity s) >>= \case
       Left t | now - t >= life -> Nothing <$ modifyTVar list (s:)
       _ -> pure $ Just s
     writeTVar vStreams $! HM.mapMaybe id m'
-    readTVar list
+    (,) (HM.size m) <$> readTVar list
   mapM_ closeStream xs
+  unless (null xs) $ hPutStrLn stderr $ unwords
+    [ "[reaper] closed"
+    , show (length xs)
+    , "out of"
+    , show count
+    ]
   threadDelay $ floor $ int * 1e6
 
 withFranzReader :: FilePath -> (FranzReader -> IO ()) -> IO ()

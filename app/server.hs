@@ -1,6 +1,7 @@
 {-# LANGUAGE LambdaCase, RecordWildCards #-}
 module Main where
 
+import Data.List (foldl')
 import Database.Franz.Network
 import System.Environment
 import System.Console.GetOpt
@@ -27,7 +28,7 @@ options = [Option "p" ["port"] (ReqArg (\e o -> o { port = read e }) "NUM") "por
 main :: IO ()
 main = getOpt Permute options <$> getArgs >>= \case
   (fs, args, []) -> do
-    let Options{..} = foldl (flip id) defaultOptions fs
+    let Options{..} = foldl' (flip id) defaultOptions fs
     let start = startServer reaperInterval streamLife port
     case args of
       path : apath : _ -> start path (Just apath)

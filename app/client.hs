@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase, RecordWildCards #-}
+{-# LANGUAGE LambdaCase #-}
 module Main where
 import Database.Franz
 import Database.Franz.Network
@@ -7,6 +7,7 @@ import Control.Monad
 import Control.Concurrent.STM
 import Data.Function (fix)
 import Data.Functor.Identity
+import Data.List (foldl')
 import qualified Data.ByteString.Char8 as B
 import Network.Socket (PortNumber)
 import System.Environment
@@ -63,7 +64,7 @@ printBS o (_, _, bs) = do
 main :: IO ()
 main = getOpt Permute options <$> getArgs >>= \case
   (fs, [name], []) -> do
-    let o = foldl (flip id) defaultOptions fs
+    let o = foldl' (flip id) defaultOptions fs
     parseHostPort (host o) withConnection mempty $ \conn -> do
       let name' = B.pack name
       let timeout' = floor $ timeout o * 1000000
