@@ -198,7 +198,7 @@ withFranzReader prefix k = do
 handleQuery :: FranzReader
   -> FilePath
   -> Query
-  -> IO (STM (Stream, Bool, QueryResult))
+  -> IO (Stream, STM (Bool, QueryResult))
 handleQuery FranzReader{..} dir (Query name begin_ end_ rt) = do
   streams <- readTVarIO vStreams
   let path = prefix </> dir </> B.unpack name
@@ -209,8 +209,8 @@ handleQuery FranzReader{..} dir (Query name begin_ end_ rt) = do
       atomically $ modifyTVar' vStreams $ HM.insert streamId s
       return s
     Just vStream -> return vStream
-  return $ do
-    modifyTVar' vActivity addActivity
+  atomically $ modifyTVar' vActivity addActivity
+  return $ (,) stream $ do
     readTVar vCaughtUp >>= check
     allOffsets <- readTVar vOffsets
     let finalOffset = case IM.maxViewWithKey allOffsets of
@@ -236,5 +236,4 @@ handleQuery FranzReader{..} dir (Query name begin_ end_ rt) = do
           let (body, lastItem, _) = IM.splitLookup val m
           let body' = maybe id (IM.insert val) lastItem body
           return $! maybe minBound fst $ IM.maxView body'
-    let (ready, result) = range begin end rt allOffsets
-    return (stream, ready, result)
+    return $! range begin end rt allOffsets

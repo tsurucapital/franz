@@ -81,11 +81,11 @@ respond env refThreads (B.unpack -> path) buf vConn = do
   recvConn <- readMVar vConn
   runGetRecv buf recvConn get >>= \case
     Right (RawRequest reqId req) -> do
-      query <- handleQuery env path req
+      (stream, query) <- handleQuery env path req
       join $ atomically $ do
-        (stream, ready, offsets) <- query
+        (ready, offsets) <- query
         return $ if ready
-          then send (ResponseInstant reqId) stream offsets
+          then removeActivity stream >> send (ResponseInstant reqId) stream offsets
           else do
             m <- readIORef refThreads
             if IM.member reqId m
@@ -93,11 +93,15 @@ respond env refThreads (B.unpack -> path) buf vConn = do
               else do
                 sendHeader $ ResponseWait reqId
                 -- Fork a thread to send a delayed response
-                tid <- forkIO $ join $ atomically $ do
-                  (stream', ready', offsets') <- query
-                  check ready'
-                  return $ send (ResponseDelayed reqId) stream' offsets'
+                tid <- flip forkFinally (const $ removeActivity stream)
+                  $ join $ atomically $ do
+                    (ready', offsets') <- query
+                    check ready'
+                    return $ send (ResponseDelayed reqId) stream offsets'
                 writeIORef refThreads $! IM.insert reqId tid m
+        `catchSTM` \e -> return $ do
+          removeActivity stream
+          sendHeader $ ResponseError reqId e
     Right (RawClean reqId) -> do
       m <- readIORef refThreads
       mapM_ killThread $ IM.lookup reqId m
@@ -105,12 +109,11 @@ respond env refThreads (B.unpack -> path) buf vConn = do
     Left err -> throwIO $ MalformedRequest err
   where
     sendHeader x = withMVar vConn $ \conn -> SB.sendAll conn $ encode x
-    send header stream@Stream{..} ((s0, p0), (s1, p1)) = withMVar vConn $ \conn -> do
+    send header Stream{..} ((s0, p0), (s1, p1)) = withMVar vConn $ \conn -> do
       SB.sendAll conn $ encode (header, PayloadHeader s0 s1 p0 indexNames)
       let siz = 8 * (length indexNames + 1)
       SF.sendFile' conn indexHandle (fromIntegral $ siz * succ s0) (fromIntegral $ siz * (s1 - s0))
       SF.sendFile' conn payloadHandle (fromIntegral p0) (fromIntegral $ p1 - p0)
-      removeActivity stream
 
 startServer
     :: Double -- reaping interval
@@ -244,11 +247,13 @@ connect host port dir = do
         return $ do
           m <- readTVar connStates
           case IM.lookup i m of
+            Nothing -> pure ()
             Just WaitingInstant -> writeTVar connStates $! IM.insert i (Available resp) m
             e -> throwSTM $ ClientError $ "Unexpected state on ResponseInstant " ++ show i ++ ": " ++ show e
       ResponseWait i -> return $ do
         m <- readTVar connStates
         case IM.lookup i m of
+          Nothing -> pure ()
           Just WaitingInstant -> writeTVar connStates $! IM.insert i WaitingDelayed m
           e -> throwSTM $ ClientError $ "Unexpected state on ResponseWait " ++ show i ++ ": " ++ show e
       ResponseDelayed i -> do
@@ -256,6 +261,7 @@ connect host port dir = do
         return $ do
           m <- readTVar connStates
           case IM.lookup i m of
+            Nothing -> pure ()
             Just WaitingDelayed -> writeTVar connStates $! IM.insert i (Available resp) m
             e -> throwSTM $ ClientError $ "Unexpected state on ResponseDelayed " ++ show i ++ ": " ++ show e
       ResponseError i e -> return $ do
