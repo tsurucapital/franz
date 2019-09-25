@@ -275,7 +275,7 @@ connect host port dir = do
 disconnect :: Connection -> IO ()
 disconnect Connection{..} = do
   killThread connThread
-  takeMVar connSocket >>= S.close
+  withMVar connSocket S.close
 
 runGetRecv :: IORef B.ByteString -> S.Socket -> Get a -> IO (Either String a)
 runGetRecv refBuf sock m = do
