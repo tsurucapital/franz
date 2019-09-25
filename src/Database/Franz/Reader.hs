@@ -66,7 +66,10 @@ removeActivity str = do
       | otherwise -> Right (n - 1)
 
 closeStream :: Stream -> IO ()
-closeStream = killThread . followThread
+closeStream Stream{..} = do
+  killThread followThread
+  hClose payloadHandle
+  hClose indexHandle
 
 createStream :: WatchManager -> FilePath -> IO Stream
 createStream man path = do

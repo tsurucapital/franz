@@ -102,6 +102,7 @@ respond env refThreads (B.unpack -> path) buf vConn = do
         `catchSTM` \e -> return $ do
           removeActivity stream
           sendHeader $ ResponseError reqId e
+      `catch` \e -> sendHeader $ ResponseError reqId e
     Right (RawClean reqId) -> do
       m <- readIORef refThreads
       mapM_ killThread $ IM.lookup reqId m
