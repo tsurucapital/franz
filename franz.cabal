@@ -23,8 +23,6 @@ library
       Database.Franz
       Database.Franz.Reader
       Database.Franz.Network
-  other-modules:
-      Paths_franz
   hs-source-dirs:
       src
   build-depends:
@@ -50,8 +48,6 @@ library
 
 executable franz
   main-is: client.hs
-  other-modules:
-      Paths_franz
   hs-source-dirs:
       app
   build-depends:
@@ -64,8 +60,6 @@ executable franz
 
 executable franzd
   main-is: server.hs
-  other-modules:
-      Paths_franz
   hs-source-dirs:
       app
   ghc-options: -threaded
