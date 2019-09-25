@@ -1,15 +1,17 @@
 cabal-version:  2.0
-name:           franz
 version:        0.2.1
+name:           franz
 description:    Please see the README on GitHub at <https://github.com/fumieval/franz#readme>
 homepage:       https://github.com/fumieval/franz#readme
 bug-reports:    https://github.com/fumieval/franz/issues
 author:         Fumiaki Kinoshita
 maintainer:     fumiexcel@gmail.com
-copyright:      Copyright (c) 2017 Fumiaki Kinoshita
+copyright:      Copyright (c) 2019 Fumiaki Kinoshita
 license:        BSD3
 license-file:   LICENSE
 build-type:     Simple
+category:       Database
+synopsis:       Append-only database
 extra-source-files:
     ChangeLog.md
     README.md
