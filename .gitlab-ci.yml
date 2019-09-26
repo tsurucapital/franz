@@ -11,8 +11,8 @@ default:
 
 after_script:
   - "mkdir -p release"
-  - "cp dist-newstyle/build/x86_64-linux/ghc-8.6.4.0/franz-0.1.0.0/x/franzd/build/franzd/franzd release/franzd"
-  - "cp dist-newstyle/build/x86_64-linux/ghc-8.6.4.0/franz-0.1.0.0/x/franz/build/franz/franz release/franz"
+  - "cp dist-newstyle/build/x86_64-linux/ghc-8.6.4.0/franz-*/x/franzd/build/franzd/franzd release/franzd"
+  - "cp dist-newstyle/build/x86_64-linux/ghc-8.6.4.0/franz-*/x/franz/build/franz/franz release/franz"
 
 release:
   script: "$CABAL v2-build"
