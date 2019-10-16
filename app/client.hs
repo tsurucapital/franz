@@ -8,6 +8,7 @@ import Control.Concurrent.STM
 import Data.Function (fix)
 import Data.Functor.Identity
 import Data.List (foldl')
+import qualified Data.ByteString.Builder as BB
 import qualified Data.ByteString.Char8 as B
 import Network.Socket (PortNumber)
 import System.Environment
@@ -57,7 +58,7 @@ defaultOptions = Options
 
 printBS :: Options -> (a, b, B.ByteString) -> IO ()
 printBS o (_, _, bs) = do
-  when (prefixLength o) $ print $ B.length bs
+  when (prefixLength o) $ BB.hPutBuilder stdout $ BB.word64LE $ fromIntegral $ B.length bs
   B.hPutStr stdout bs
   hFlush stdout
 
