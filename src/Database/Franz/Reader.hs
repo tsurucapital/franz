@@ -101,6 +101,7 @@ createStream man path = do
   indexHandle <- openFile offsetPath ReadMode
 
   let final :: Either SomeException Void -> IO ()
+      final (Left exc) | Just ThreadKilled <- fromException exc = pure ()
       final (Left exc) = logFollower [path, "terminated with", show exc]
       final (Right v) = absurd v
 
@@ -123,8 +124,6 @@ createStream man path = do
             writeTVar vCount $! i + 1
 
   let indices = HM.fromList $ zip indexNames vIndices
-
-  logFollower ["started", path]
 
   vActivity <- getMonotonicTime >>= newTVarIO . Left
   return Stream{..}
@@ -167,7 +166,7 @@ instance Exception FranzException
 
 data FranzReader = FranzReader
   { watchManager :: WatchManager
-  , vStreams :: TVar (HM.HashMap B.ByteString Stream)
+  , vStreams :: TVar (HM.HashMap FilePath (HM.HashMap B.ByteString Stream))
   , prefix :: FilePath
   }
 
@@ -179,11 +178,12 @@ reaper int life FranzReader{..} = forever $ do
   (count, xs) <- atomically $ do
     list <- newTVar []
     m <- readTVar vStreams
-    m' <- forM m $ \s -> readTVar (vActivity s) >>= \case
-      Left t | now - t >= life -> Nothing <$ modifyTVar list (s:)
-      _ -> pure $ Just s
-    writeTVar vStreams $! HM.mapMaybe id m'
-    (,) (HM.size m) <$> readTVar list
+    m' <- forM m $ \g -> fmap (HM.mapMaybe id)
+      $ forM g $ \s -> readTVar (vActivity s) >>= \case
+        Left t | now - t >= life -> Nothing <$ modifyTVar list (s:)
+        _ -> pure $ Just s
+    writeTVar vStreams $! HM.filter (not . null) m'
+    (,) (sum $ fmap HM.size m) <$> readTVar list
   mapM_ closeStream xs
   unless (null xs) $ hPutStrLn stderr $ unwords
     [ "[reaper] closed"
@@ -203,13 +203,13 @@ handleQuery :: FranzReader
   -> Query
   -> IO (Stream, STM (Bool, QueryResult))
 handleQuery FranzReader{..} dir (Query name begin_ end_ rt) = do
-  streams <- readTVarIO vStreams
+  allStreams <- readTVarIO vStreams
   let path = prefix </> dir </> B.unpack name
-  let streamId = B.pack dir <> name
-  stream@Stream{..} <- case HM.lookup streamId streams of
+  let streams = maybe mempty id $ HM.lookup dir allStreams
+  stream@Stream{..} <- case HM.lookup name streams of
     Nothing -> do
       s <- createStream watchManager path
-      atomically $ modifyTVar' vStreams $ HM.insert streamId s
+      atomically $ modifyTVar' vStreams $ HM.insert dir $ HM.insert name s streams
       return s
     Just vStream -> return vStream
   atomically $ modifyTVar' vActivity addActivity
