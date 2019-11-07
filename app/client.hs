@@ -28,7 +28,6 @@ data Options = Options
   , index :: Maybe B.ByteString
   , ranges :: [(Int, Int)]
   , beginning :: Maybe Int
-  , prefixLength :: Bool
   }
 
 readOffset :: String -> Int
@@ -45,7 +44,6 @@ options = [Option "h" ["host"] (ReqArg (\str o -> o { host = str }) "HOST:PORT")
   , Option "t" ["timeout"] (ReqArg (\str o -> o { timeout = read str }) "SECONDS") "Timeout"
   , Option "p" ["prefix"] (ReqArg (\str o -> o { prefix = str }) "PREFIX") "Archive prefix"
   , Option "i" ["index"] (ReqArg (\str o -> o { index = Just $ B.pack str }) "NAME") "Index name"
-  , Option "" ["prefix-length"] (NoArg (\o -> o { prefixLength = True })) "Prefix payloads by their lengths"
   ]
 
 defaultOptions :: Options
@@ -55,13 +53,12 @@ defaultOptions = Options
   , ranges = []
   , beginning = Nothing
   , index = Nothing
-  , prefixLength = False
   , prefix = ""
   }
 
 printBS :: Options -> (a, b, B.ByteString) -> IO ()
 printBS o (_, _, bs) = do
-  when (prefixLength o) $ BB.hPutBuilder stdout $ BB.word64LE $ fromIntegral $ B.length bs
+  BB.hPutBuilder stdout $ BB.word64LE $ fromIntegral $ B.length bs
   B.hPutStr stdout bs
   hFlush stdout
 
