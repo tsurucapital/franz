@@ -44,7 +44,7 @@ import qualified Network.Socket as S
 import System.Directory
 import System.FilePath
 import System.IO
-import System.Process (readProcess)
+import System.Process (ProcessHandle, readProcess, spawnProcess, terminateProcess, waitForProcess)
 
 defaultPort :: S.PortNumber
 defaultPort = 1886
@@ -128,7 +128,7 @@ startServer interval life port lprefix aprefix = withFranzReader lprefix $ \env 
   hSetBuffering stderr LineBuffering
   _ <- forkIO $ reaper interval life env
 
-  vMountCount <- newTVarIO (HM.empty :: HM.HashMap FilePath Int)
+  vMountCount <- newTVarIO (HM.empty :: HM.HashMap FilePath (ProcessHandle, Int))
   let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICHOST, S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
   addr:_ <- S.getAddrInfo (Just hints) (Just "0.0.0.0") (Just $ show port)
   bracket (S.socket (S.addrFamily addr) S.Stream (S.addrProtocol addr)) S.close $ \sock -> do
@@ -165,27 +165,37 @@ startServer interval life port lprefix aprefix = withFranzReader lprefix $ \env 
                   b <- doesFileExist src
                   when b $ do
                     createDirectoryIfMissing True dest
-                    callProcess' "squashfuse" [src, dest]
-                    atomically $ writeTVar vMountCount $! HM.insert path 1 m
-                Just n -> fmap pure $ writeTVar vMountCount $ HM.insert path (n + 1) m
+                    logServer ["squashfuse", "-f", src, dest]
+                    fuse <- spawnProcess "squashfuse" ["-f", src, dest]
+                    threadDelay 100000
+                    atomically $ writeTVar vMountCount $! HM.insert path (fuse, 1) m
+                Just (_, 0) -> retry -- it's being closed unfortunately
+                Just (fuse, n) -> fmap pure $ writeTVar vMountCount
+                  $ HM.insert path (fuse, n + 1) m
 
             respondLoop path
               `finally` do
+                m0 <- readTVarIO vMountCount
+                logServer [show connAddr, "disconnected", show $ fmap snd m0]
                 join $ atomically $ do
                   m <- readTVar vMountCount
                   case HM.lookup path m of
-                    Just 1 -> return $ do
-                      -- close the last client's streams
-                      streams <- atomically $ do
-                        ss <- readTVar $ vStreams env
-                        writeTVar (vStreams env) $ HM.delete path ss
-                        return ss
-                      forM_ (HM.lookup path streams) $ mapM_ closeStream
-                      callProcess' "fusermount" ["-u", dest]
-                      callProcess' "rmdir" [dest]
-                      atomically $ writeTVar vMountCount $ HM.delete path m
-                    Just n -> do
-                      writeTVar vMountCount $! HM.insert path (n - 1) m
+                    Just (_, 0) -> pure $ pure () -- someone else is closing
+                    Just (fuse, 1) -> do
+                      writeTVar vMountCount $ HM.insert path (fuse, 0) m
+                      return $ do
+                        -- close the last client's streams
+                        streams <- atomically $ do
+                          ss <- readTVar $ vStreams env
+                          writeTVar (vStreams env) $ HM.delete path ss
+                          return ss
+                        forM_ (HM.lookup path streams) $ mapM_ closeStream
+                        terminateProcess fuse
+                        _ <- waitForProcess fuse
+                        callProcess' "rmdir" [dest]
+                        atomically $ writeTVar vMountCount $ HM.delete path m
+                    Just (fuse, n) -> do
+                      writeTVar vMountCount $! HM.insert path (fuse, n - 1) m
                       pure (pure ())
                     Nothing -> pure (pure ())
           Right path -> respondLoop $ B.unpack path
