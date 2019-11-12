@@ -64,7 +64,7 @@ executable franzd
   main-is: server.hs
   hs-source-dirs:
       app
-  ghc-options: -threaded
+  ghc-options: -threaded -O2
   build-depends:
       base >=4.7 && <5
     , franz

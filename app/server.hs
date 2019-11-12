@@ -36,4 +36,4 @@ main = getOpt Permute options <$> getArgs >>= \case
       [] -> start "." Nothing
   (_, _, es) -> do
     name <- getProgName
-    die $ unlines ("franzd [-p PORT] PATH [ARCHIVE_PATH]" : es) ++ usageInfo name options
+    die $ unlines ("franzd PATH [ARCHIVE_PATH]" : es) ++ usageInfo name options

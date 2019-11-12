@@ -23,11 +23,11 @@ parseHostPort str k = case break (==':') str of
 
 data Options = Options
   { host :: String
+  , prefix :: String
   , timeout :: Double
   , index :: Maybe B.ByteString
   , ranges :: [(Int, Int)]
   , beginning :: Maybe Int
-  , prefixLength :: Bool
   }
 
 readOffset :: String -> Int
@@ -42,8 +42,8 @@ options = [Option "h" ["host"] (ReqArg (\str o -> o { host = str }) "HOST:PORT")
       }) "FROM:TO") "ranges"
   , Option "b" ["begin"] (ReqArg (\str o -> o { beginning = Just $! readOffset str }) "pos") "get all the contents from this position"
   , Option "t" ["timeout"] (ReqArg (\str o -> o { timeout = read str }) "SECONDS") "Timeout"
+  , Option "p" ["prefix"] (ReqArg (\str o -> o { prefix = str }) "PREFIX") "Archive prefix"
   , Option "i" ["index"] (ReqArg (\str o -> o { index = Just $ B.pack str }) "NAME") "Index name"
-  , Option "" ["prefix-length"] (NoArg (\o -> o { prefixLength = True })) "Prefix payloads by their lengths"
   ]
 
 defaultOptions :: Options
@@ -53,12 +53,12 @@ defaultOptions = Options
   , ranges = []
   , beginning = Nothing
   , index = Nothing
-  , prefixLength = False
+  , prefix = ""
   }
 
 printBS :: Options -> (a, b, B.ByteString) -> IO ()
 printBS o (_, _, bs) = do
-  when (prefixLength o) $ BB.hPutBuilder stdout $ BB.word64LE $ fromIntegral $ B.length bs
+  BB.hPutBuilder stdout $ BB.word64LE $ fromIntegral $ B.length bs
   B.hPutStr stdout bs
   hFlush stdout
 
@@ -66,7 +66,7 @@ main :: IO ()
 main = getOpt Permute options <$> getArgs >>= \case
   (fs, [name], []) -> do
     let o = foldl' (flip id) defaultOptions fs
-    parseHostPort (host o) withConnection mempty $ \conn -> do
+    parseHostPort (host o) withConnection (B.pack $ prefix o) $ \conn -> do
       let name' = B.pack name
       let timeout' = floor $ timeout o * 1000000
       let f = maybe BySeqNum ByIndex (index o)
