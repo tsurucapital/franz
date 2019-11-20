@@ -256,6 +256,7 @@ connect host port dir = do
   let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
   addr:_ <- S.getAddrInfo (Just hints) (Just host) (Just $ show port)
   sock <- S.socket (S.addrFamily addr) S.Stream (S.addrProtocol addr)
+  S.setSocketOption sock S.NoDelay 1
   S.connect sock $ S.addrAddress addr
   SB.sendAll sock $ encode dir
   readyMsg <- SB.recv sock 4096
