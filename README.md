@@ -40,7 +40,7 @@ franzd is a read-only server which follows franz files and gives access on wire.
 Where to look for streams can be specified as a command-line argument, separately for live streams and squashfs images.
 
 ```
-franzd /live /archive
+franzd --live /path/to/live --archive /path/to/archive
 ```
 
 You can obtain a `Connection` to a remote franz file with `withConnection`.
