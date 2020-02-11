@@ -1,7 +1,8 @@
-{-# LANGUAGE DeriveGeneric, LambdaCase, OverloadedStrings, ViewPatterns #-}
+{-# LANGUAGE DeriveGeneric, LambdaCase, OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE BangPatterns #-}
 module Database.Franz.Network
   ( startServer
   , defaultPort
@@ -33,10 +34,11 @@ import Database.Franz.Reader
 import qualified Data.IntMap.Strict as IM
 import Data.IORef
 import Data.Int (Int64)
-import Data.Serialize
+import Data.Serialize hiding (getInt64le)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.HashMap.Strict as HM
 import qualified Data.Vector as V
+import qualified Data.Vector.Generic.Mutable as VGM
 import GHC.Generics (Generic)
 import qualified Network.Socket.SendFile.Handle as SF
 import qualified Network.Socket.ByteString as SB
@@ -45,6 +47,7 @@ import System.Directory
 import System.FilePath
 import System.IO
 import System.Process (ProcessHandle, readProcess, spawnProcess, terminateProcess, waitForProcess)
+import System.Endian (fromLE64)
 
 defaultPort :: S.PortNumber
 defaultPort = 1886
@@ -69,8 +72,7 @@ data PayloadHeader = PayloadHeader !Int !Int !Int ![B.ByteString]
 instance Serialize PayloadHeader where
   put (PayloadHeader s t u xs) = f s *> f t *> f u *> put xs where
     f = putInt64le . fromIntegral
-  get = PayloadHeader <$> f <*> f <*> f <*> get where
-    f = fromIntegral <$> getInt64le
+  get = PayloadHeader <$> getInt64le <*> getInt64le <*> getInt64le <*> get
 
 respond :: FranzReader
   -> IORef (IM.IntMap ThreadId)
@@ -330,7 +332,7 @@ defQuery name = Query
 type SomeIndexMap = HM.HashMap B.ByteString Int64
 
 -- | (seqno, indices, payloads)
-type Contents = [(Int, SomeIndexMap, B.ByteString)]
+type Contents = V.Vector (Int, SomeIndexMap, B.ByteString)
 
 -- | When it is 'Right', it might block until the content arrives.
 type Response = Either Contents (STM Contents)
@@ -338,19 +340,32 @@ type Response = Either Contents (STM Contents)
 awaitResponse :: STM (Either a (STM a)) -> STM a
 awaitResponse = (>>=either pure id)
 
+getInt64le :: Num a => Get a
+getInt64le = fromIntegral . fromLE64 <$> getWord64host
+{-# INLINE getInt64le #-}
+
 getResponse :: Get Contents
 getResponse = do
-  PayloadHeader s0 s1 p0 names <- get
-  ixs <- V.replicateM (s1 - s0) $ (,) <$> fmap fromIntegral getInt64le <*> traverse (const getInt64le) names
-  let ofss = V.cons p0 $ V.map fst ixs
-  payload <- getByteString $ fromIntegral $ V.last ofss - p0
-  return $ do
-    i <- [0..s1-s0-1]
-    let ofs0 = maybe (error "ofs0") id $ ofss V.!? i
-    let ofs1 = maybe (error "ofs1") fst $ ixs V.!? i
-    let indices = maybe (error "indices") snd $ ixs V.!? i
-    pure (s0 + i + 1, HM.fromList $ zip names indices, B.take (ofs1 - ofs0) $ B.drop (ofs0 - p0) payload)
-
+    PayloadHeader s0 s1 p0 names <- get
+    let df = s1 - s0
+    if df <= 0
+        then pure mempty
+        else do
+            ixs <- V.replicateM df $ (,) <$> getInt64le <*> traverse (const getInt64le) names
+            payload <- getByteString $ fst (V.unsafeLast ixs) - p0
+            pure $ V.create $ do
+                vres <- VGM.unsafeNew df
+                let go i ofs0
+                        | i >= df = pure ()
+                        | otherwise = do
+                              let (ofs1, indices) = V.unsafeIndex ixs i
+                                  !m = HM.fromList $ zip names indices
+                                  !bs = B.take (ofs1 - ofs0) $ B.drop (ofs0 - p0) payload
+                                  !num = s0 + i + 1
+                              VGM.unsafeWrite vres i (num, m, bs)
+                              go (i + 1) ofs1
+                go 0 p0
+                return vres
 
 -- | Fetch requested data from the server.
 -- Termination of the continuation cancels the request, allowing flexible
@@ -370,7 +385,7 @@ fetch Connection{..} req cont = do
     go = do
       m <- readTVar connStates
       case IM.lookup reqId m of
-        Nothing -> return $ Left [] -- fetch ended; nothing to return
+        Nothing -> return $ Left V.empty -- fetch ended; nothing to return
         Just WaitingInstant -> retry -- wait for an instant response
         Just (Available xs) -> do
           writeTVar connStates $! IM.delete reqId m
@@ -378,7 +393,7 @@ fetch Connection{..} req cont = do
         Just WaitingDelayed -> return $ Right $ do
           m' <- readTVar connStates
           case IM.lookup reqId m' of
-            Nothing -> return [] -- fetch ended; nothing to return
+            Nothing -> return V.empty -- fetch ended; nothing to return
             Just WaitingDelayed -> retry
             Just (Available xs) -> do
               writeTVar connStates $! IM.delete reqId m'
@@ -410,7 +425,7 @@ fetchSimple :: Connection
   -> Int -- ^ timeout in microseconds
   -> Query
   -> IO Contents
-fetchSimple conn timeout req = fetch conn req (fmap (maybe [] id) . atomicallyWithin timeout . awaitResponse)
+fetchSimple conn timeout req = fetch conn req (fmap (maybe mempty id) . atomicallyWithin timeout . awaitResponse)
 
 atomicallyWithin :: Int -- ^ timeout in microseconds
   -> STM a

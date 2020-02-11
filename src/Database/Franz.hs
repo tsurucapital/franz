@@ -14,6 +14,7 @@ module Database.Franz (
     ) where
 
 import Control.Concurrent
+import Control.DeepSeq (NFData(..))
 import Control.Exception
 import Control.Monad
 import qualified Data.ByteString.FastBuilder as BB
@@ -32,13 +33,15 @@ import System.FilePath
 import System.IO
 
 data WriterHandle (f :: Type -> Type) = WriterHandle
-  { hPayload :: Handle
-  , hOffset :: Handle -- ^ Handle for offsets and indices
-  , vOffset :: MVar (Int, Word64) -- ^ (next sequential number, current payload file size)
-  , offsetBuf :: MV.IOVector Word64 -- ^ pending indices
-  , offsetPtr :: IORef Int -- ^ the number of pending indices
-  , indexCount :: Int -- ^ the number of Word64s to write for item
+  { hPayload :: !Handle
+  , hOffset :: !Handle -- ^ Handle for offsets and indices
+  , vOffset :: !(MVar (Int, Word64)) -- ^ (next sequential number, current payload file size)
+  , offsetBuf :: !(MV.IOVector Word64) -- ^ pending indices
+  , offsetPtr :: !(IORef Int) -- ^ the number of pending indices
+  , indexCount :: !Int -- ^ the number of Word64s to write for item
   }
+instance NFData (WriterHandle f) where
+  rnf WriterHandle{} = ()
 
 -- | Get the sequential number of the last item item written.
 getLastSeqNo :: WriterHandle f -> IO Int
@@ -74,7 +77,7 @@ openWriter idents path = do
   return WriterHandle{..}
 
 -- | Flush any pending data and close a 'WriterHandle'.
-closeWriter :: Foldable f => WriterHandle f -> IO ()
+closeWriter :: WriterHandle f -> IO ()
 closeWriter h@WriterHandle{..} = do
   flush h
   hClose hPayload

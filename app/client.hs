@@ -8,6 +8,7 @@ import Control.Concurrent.STM
 import Data.Function (fix)
 import Data.Functor.Identity
 import Data.List (foldl')
+import qualified Data.Vector as V
 import qualified Data.ByteString.Builder as BB
 import qualified Data.ByteString.Char8 as B
 import Network.Socket (PortNumber)
@@ -76,7 +77,7 @@ main = getOpt Permute options <$> getArgs >>= \case
       forM_ (beginning o) $ \start -> flip fix start $ \self i -> do
         bss <- fetchSimple conn timeout' (req i i)
         mapM_ (printBS o) bss
-        unless (null bss) $ self $ let (j, _, _) = last bss in j + 1
+        unless (null bss) $ self $ let (j, _, _) = V.last bss in j + 1
 
   (_, _, es) -> do
     name <- getProgName

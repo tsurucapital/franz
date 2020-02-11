@@ -33,6 +33,7 @@ library
     , cereal
     , containers
     , cpu
+    , deepseq
     , directory
     , fast-builder ^>= 0.1.2.0
     , filepath
@@ -58,6 +59,7 @@ executable franz
     , franz
     , network
     , stm
+    , vector
   default-language: Haskell2010
 
 executable franzd
