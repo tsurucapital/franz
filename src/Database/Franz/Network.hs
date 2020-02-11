@@ -96,7 +96,11 @@ respond env refThreads path buf vConn = do
               else do
                 sendHeader $ ResponseWait reqId
                 -- Fork a thread to send a delayed response
-                tid <- flip forkFinally (const $ removeActivity stream)
+                let cleanup _ = do
+                      _ <- popThread reqId
+                      removeActivity stream
+
+                tid <- flip forkFinally cleanup
                   $ join $ atomically $ do
                     (ready', offsets') <- query
                     check ready'
@@ -107,11 +111,12 @@ respond env refThreads path buf vConn = do
           sendHeader $ ResponseError reqId e
       `catch` \e -> sendHeader $ ResponseError reqId e
     Right (RawClean reqId) -> do
-      m <- readIORef refThreads
-      mapM_ killThread $ IM.lookup reqId m
-      writeIORef refThreads $! IM.delete reqId m
+      tid <- popThread reqId
+      mapM_ killThread tid
     Left err -> throwIO $ MalformedRequest err
   where
+    popThread reqId = atomicModifyIORef' refThreads (\m -> (IM.delete reqId m, IM.lookup reqId m))
+
     sendHeader x = withMVar vConn $ \conn -> SB.sendAll conn $ encode x
     send header Stream{..} ((s0, p0), (s1, p1)) = withMVar vConn $ \conn -> do
       SB.sendAll conn $ encode (header, PayloadHeader s0 s1 p0 indexNames)
@@ -418,9 +423,13 @@ fetch Connection{..} req cont = do
             Just WaitingInstant -> throwSTM $ ClientError $ "fetch/WaitingDelayed: unexpected state WaitingInstant"
         Just (Errored e) -> throwSTM e
   cont go `finally` do
-    withMVar connSocket $ \sock -> do
-      atomically $ modifyTVar' connStates $ IM.delete reqId
-      SB.sendAll sock $ encode $ RawClean reqId
+    withMVar connSocket $ \sock -> join $ atomically $ do
+      m <- readTVar connStates
+      writeTVar connStates $! IM.delete reqId m
+      -- If the response arrived, no need to send a clean request
+      return $ when (IM.member reqId m)
+        $ SB.sendAll sock $ encode $ RawClean reqId
+
 
 -- | Queries in traversable @t@ form an atomic request. The response will become
 -- available once all the elements are available.
