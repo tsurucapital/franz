@@ -1,7 +1,7 @@
 {-# LANGUAGE LambdaCase, RecordWildCards #-}
 module Main where
 
-import Database.Franz.Network
+import Database.Franz.Server
 import Options.Applicative
 
 options :: Parser Settings

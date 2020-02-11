@@ -23,8 +23,11 @@ source-repository head
 library
   exposed-modules:
       Database.Franz
+      Database.Franz.Internal
       Database.Franz.Reader
+      Database.Franz.Server
       Database.Franz.Network
+      Database.Franz.Protocol
   hs-source-dirs:
       src
   build-depends:

@@ -8,6 +8,7 @@ import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad
 import Data.Serialize
+import Database.Franz.Protocol
 import qualified Data.ByteString.Char8 as B
 import qualified Data.HashMap.Strict as HM
 import qualified Data.IntMap.Strict as IM
@@ -16,27 +17,10 @@ import qualified Data.Vector as V
 import Data.Void
 import Data.Maybe (isJust)
 import GHC.Clock (getMonotonicTime)
-import GHC.Generics (Generic)
 import System.Directory
 import System.FilePath
 import System.IO
 import System.FSNotify
-
-data RequestType = AllItems | LastItem deriving (Show, Generic)
-instance Serialize RequestType
-
-data ItemRef = BySeqNum !Int -- ^ sequential number
-  | ByIndex !B.ByteString !Int -- ^ index name and value
-  deriving (Show, Generic)
-instance Serialize ItemRef
-
-data Query = Query
-  { reqStream :: !B.ByteString
-  , reqFrom :: !ItemRef -- ^ name of the index to search
-  , reqTo :: !ItemRef -- ^ name of the index to search
-  , reqType :: !RequestType
-  } deriving (Show, Generic)
-instance Serialize Query
 
 data Stream = Stream
   { vOffsets :: !(TVar (IM.IntMap Int))
@@ -154,15 +138,6 @@ range begin end rt allOffsets = case rt of
 
 splitR :: Int -> IM.IntMap a -> (IM.IntMap a, IM.IntMap a)
 splitR i m = let (l, p, r) = IM.splitLookup i m in (l, maybe id (IM.insert i) p r)
-
-data FranzException = MalformedRequest !String
-  | StreamNotFound !FilePath
-  | IndexNotFound !B.ByteString ![B.ByteString]
-  | InternalError !String
-  | ClientError !String
-  deriving (Show, Generic)
-instance Serialize FranzException
-instance Exception FranzException
 
 data FranzReader = FranzReader
   { watchManager :: WatchManager
