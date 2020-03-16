@@ -35,14 +35,17 @@ library
     , bytestring
     , cereal
     , containers
+    , concurrent-resource-map
     , cpu
     , deepseq
     , directory
     , fast-builder ^>= 0.1.2.0
     , filepath
     , fsnotify
+    , mtl
     , network
     , process
+    , retry
     , sendfile
     , stm
     , stm-delay

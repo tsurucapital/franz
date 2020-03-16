@@ -136,7 +136,7 @@ defQuery name = Query
   , reqType = AllItems
   }
 
-type SomeIndexMap = HM.HashMap B.ByteString Int64
+type SomeIndexMap = HM.HashMap IndexName Int64
 
 -- | (seqno, indices, payloads)
 type Contents = V.Vector (Int, SomeIndexMap, B.ByteString)

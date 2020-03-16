@@ -2,6 +2,7 @@
 module Database.Franz.Protocol
   ( apiVersion
   , defaultPort
+  , IndexName
   , FranzException(..)
   , RequestType(..)
   , ItemRef(..)
@@ -24,9 +25,11 @@ apiVersion = B.pack "0"
 defaultPort :: PortNumber
 defaultPort = 1886
 
+type IndexName = B.ByteString
+
 data FranzException = MalformedRequest !String
   | StreamNotFound !FilePath
-  | IndexNotFound !B.ByteString ![B.ByteString]
+  | IndexNotFound !IndexName ![IndexName]
   | InternalError !String
   | ClientError !String
   deriving (Show, Generic)
@@ -37,7 +40,7 @@ data RequestType = AllItems | LastItem deriving (Show, Generic)
 instance Serialize RequestType
 
 data ItemRef = BySeqNum !Int -- ^ sequential number
-  | ByIndex !B.ByteString !Int -- ^ index name and value
+  | ByIndex !IndexName !Int -- ^ index name and value
   deriving (Show, Generic)
 instance Serialize ItemRef
 
