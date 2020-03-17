@@ -1,8 +1,0 @@
-variables:
-  CABAL: "/opt/cabal/bin/cabal-2.4 --with-compiler=/usr/local/ghc/ghc-8.6.4.0/bin/ghc"
-
-before_script:
-  - "$CABAL v2-update"
-
-default:
-  script: "$CABAL v2-build"
