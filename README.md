@@ -1,5 +1,7 @@
 # Franz
 
+![Haskell CI](https://github.com/fumieval/franz/workflows/Haskell%20CI/badge.svg)
+
 Franz is an append-only container format, forked from liszt.
 
 Each stream is stored as a pair of concatenated payloads with an array of their
