@@ -1,0 +1,2 @@
+write-ghc-environment-files: never
+packages: .
