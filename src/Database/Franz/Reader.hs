@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE BangPatterns #-}
 module Database.Franz.Reader where
 
 import Control.Concurrent
@@ -9,7 +10,6 @@ import Control.Exception
 import Control.Monad
 import Control.Monad.State.Strict
 import Control.Monad.Trans.Maybe
-import Data.Bifunctor (first)
 import Data.Serialize
 import Database.Franz.Protocol
 import qualified Data.ByteString.Char8 as B
@@ -43,12 +43,6 @@ addActivity :: Stream -> IO ()
 addActivity str = atomically $ modifyTVar' (vActivity str) $ \case
   Left _ -> Right 0
   Right n -> Right (n + 1)
-
--- | Update the stream timestamp so that it doesn't get killed immediately
-touchActivity :: Stream -> IO ()
-touchActivity str = do
-  now <- getMonotonicTime
-  atomically $ modifyTVar' (vActivity str) $ first (const now)
 
 removeActivity :: Stream -> IO ()
 removeActivity str = do
@@ -245,18 +239,9 @@ withFranzReader prefix k = do
 handleQuery :: FranzReader
   -> FilePath
   -> Query
-  -> IO (Stream, STM (Bool, QueryResult))
-handleQuery FranzReader{..} dir (Query name begin_ end_ rt) = do
-  allStreams <- readTVarIO vStreams
-  let path = prefix </> dir </> B.unpack name
-  let streams = maybe mempty id $ HM.lookup dir allStreams
-  stream@Stream{..} <- case HM.lookup name streams of
-    Nothing -> do
-      s <- createStream watchManager path
-      atomically $ modifyTVar' vStreams $ HM.insert dir $ HM.insert name s streams
-      return s
-    Just vStream -> return vStream
-  return $ (,) stream $ do
+  -> (Stream -> STM (Bool, QueryResult) -> IO r) -> IO r
+handleQuery FranzReader{..} dir (Query name begin_ end_ rt) cont = bracket acquire removeActivity
+  $ \stream@Stream{..} -> cont stream $ do
     readTVar vCaughtUp >>= check
     allOffsets <- readTVar vOffsets
     let finalOffset = case IM.maxViewWithKey allOffsets of
@@ -283,3 +268,16 @@ handleQuery FranzReader{..} dir (Query name begin_ end_ rt) = do
           let body' = maybe id (IM.insert val) lastItem body
           return $! maybe minBound fst $ IM.maxView body'
     return $! range begin end rt allOffsets
+  where
+    acquire = do
+      allStreams <- readTVarIO vStreams
+      let !path = prefix </> dir </> B.unpack name
+      let !streams = maybe mempty id $ HM.lookup dir allStreams
+      stream <- case HM.lookup name streams of
+        Nothing -> do
+          s <- createStream watchManager path
+          atomically $ modifyTVar' vStreams $ HM.insert dir $ HM.insert name s streams
+          return s
+        Just vStream -> return vStream
+      addActivity stream
+      pure stream

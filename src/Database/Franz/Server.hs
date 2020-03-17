@@ -42,32 +42,27 @@ respond env refThreads path buf vConn = do
   recvConn <- readMVar vConn
   runGetRecv buf recvConn get >>= \case
     Right (RawRequest reqId req) -> do
-      (stream, query) <- handleQuery env path req
-      touchActivity stream
-      atomically (fmap Right query `catchSTM` (pure . Left)) >>= \case
-        Left e -> sendHeader $ ResponseError reqId e
-        Right (ready, offsets)
-          | ready -> send (ResponseInstant reqId) stream offsets
-          | otherwise -> do
-            m <- readIORef refThreads
-            if IM.member reqId m
-              then sendHeader $ ResponseError reqId $ MalformedRequest "duplicate request ID"
-              else do
+      let pop result = do
+            case result of
+              Left ex | Just e <- fromException ex -> sendHeader $ ResponseError reqId e
+              _ -> pure ()
+            void $ popThread reqId
+      handleQuery env path req $ \stream query -> do
+        atomically (fmap Right query `catchSTM` (pure . Left)) >>= \case
+          Left e -> sendHeader $ ResponseError reqId e
+          Right (ready, offsets)
+            | ready -> send (ResponseInstant reqId) stream offsets
+            | otherwise -> do
+              m <- readIORef refThreads
+              when (IM.member reqId m) $ throwIO $ MalformedRequest "duplicate request ID"
+              tid <- flip forkFinally pop $ do
                 sendHeader $ ResponseWait reqId
-                -- Fork a thread to send a delayed response
-                let finish _ = do
-                      _ <- popThread reqId
-                      removeActivity stream
-
-                tid <- flip forkFinally finish $ do
-                  addActivity stream
-                  offsets' <- atomically $ do
-                    (ready', offsets') <- query
-                    check ready'
-                    pure offsets'
-                  send (ResponseDelayed reqId) stream offsets'
-                writeIORef refThreads $! IM.insert reqId tid m
-
+                offsets' <- atomically $ do
+                  (ready', offsets') <- query
+                  check ready'
+                  pure offsets'
+                send (ResponseDelayed reqId) stream offsets'
+              writeIORef refThreads $! IM.insert reqId tid m
       `catch` \e -> sendHeader $ ResponseError reqId e
     Right (RawClean reqId) -> do
       tid <- popThread reqId
