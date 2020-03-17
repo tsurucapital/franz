@@ -55,7 +55,7 @@ respond env refThreads path buf vConn = do
             | otherwise -> do
               m <- readIORef refThreads
               when (IM.member reqId m) $ throwIO $ MalformedRequest "duplicate request ID"
-              tid <- flip forkFinally pop $ do
+              tid <- flip forkFinally pop $ bracket_ (addActivity stream) (removeActivity stream) $ do
                 sendHeader $ ResponseWait reqId
                 offsets' <- atomically $ do
                   (ready', offsets') <- query
