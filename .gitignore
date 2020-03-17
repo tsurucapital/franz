@@ -11,6 +11,7 @@ cabal.sandbox.config
 cabal.config
 .stack-work
 stack.yaml
+dist-newstyle
 
 # =========================
 # Operating System Files
@@ -58,3 +59,7 @@ $RECYCLE.BIN/
 
 # Windows shortcuts
 *.lnk
+
+# TAG files, hasktags &c.
+TAGS
+tags
