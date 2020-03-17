@@ -39,8 +39,8 @@ data Stream = Stream
 
 type Activity = Either Double Int
 
-addActivity :: Stream -> IO ()
-addActivity str = atomically $ modifyTVar' (vActivity str) $ \case
+addActivity :: Stream -> STM ()
+addActivity str = modifyTVar' (vActivity str) $ \case
   Left _ -> Right 0
   Right n -> Right (n + 1)
 
@@ -269,15 +269,17 @@ handleQuery FranzReader{..} dir (Query name begin_ end_ rt) cont = bracket acqui
           return $! maybe minBound fst $ IM.maxView body'
     return $! range begin end rt allOffsets
   where
-    acquire = do
-      allStreams <- readTVarIO vStreams
+    acquire = join $ atomically $ do
+      allStreams <- readTVar vStreams
       let !path = prefix </> dir </> B.unpack name
       let !streams = maybe mempty id $ HM.lookup dir allStreams
-      stream <- case HM.lookup name streams of
-        Nothing -> do
-          s <- createStream watchManager path
-          atomically $ modifyTVar' vStreams $ HM.insert dir $ HM.insert name s streams
-          return s
-        Just vStream -> return vStream
-      addActivity stream
-      pure stream
+      case HM.lookup name streams of
+        Nothing -> pure $ bracketOnError
+          (createStream watchManager path)
+          closeStream $ \s -> atomically $ do
+            addActivity s
+            modifyTVar' vStreams $ HM.insert dir $ HM.insert name s streams
+            pure s
+        Just s -> do
+          addActivity s
+          pure (pure s)
