@@ -46,7 +46,7 @@ respond env refThreads path buf vConn = do
             case result of
               Left ex | Just e <- fromException ex -> sendHeader $ ResponseError reqId e
               _ -> pure ()
-            void $ popThread reqId
+            `finally` popThread reqId
       handleQuery env path req $ \stream query -> do
         atomically (fmap Right query `catchSTM` (pure . Left)) >>= \case
           Left e -> sendHeader $ ResponseError reqId e
