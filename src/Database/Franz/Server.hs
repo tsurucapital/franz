@@ -42,7 +42,7 @@ respond :: FranzReader
 respond env refThreads path buf vConn = do
   recvConn <- readMVar vConn
   runGetRecv buf recvConn get >>= \case
-    Right (RawRequest reqId req) -> do
+    Right (RawRequest reqId req allowDelayed) -> do
       let pop result = do
             case result of
               Left ex | Just e <- fromException ex -> sendHeader $ ResponseError reqId e
@@ -53,7 +53,7 @@ respond env refThreads path buf vConn = do
           Left e -> sendHeader $ ResponseError reqId e
           Right (ready, offsets)
             | ready -> send (ResponseInstant reqId) stream offsets
-            | otherwise -> do
+            | allowDelayed -> do
               m <- readIORef refThreads
               when (IM.member reqId m) $ throwIO $ MalformedRequest "duplicate request ID"
               tid <- flip forkFinally pop $ bracket_
@@ -66,6 +66,12 @@ respond env refThreads path buf vConn = do
                     pure offsets'
                   send (ResponseDelayed reqId) stream offsets'
               writeIORef refThreads $! IM.insert reqId tid m
+            -- Response is not ready but the user indicated that they
+            -- are not interested in waiting either. While we have no
+            -- work left to do, we do want to send a message back
+            -- saying the response would be a delayed one so that the
+            -- user can give up waiting.
+            | otherwise -> sendHeader $ ResponseWait reqId
       `catch` \e -> sendHeader $ ResponseError reqId e
     Right (RawClean reqId) -> do
       tid <- popThread reqId

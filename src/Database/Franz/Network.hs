@@ -28,6 +28,7 @@ import Control.Exception
 import Control.Monad
 import qualified Data.ByteString.Char8 as B
 import Data.ConcurrentResourceMap
+import Data.Either (isRight)
 import qualified Data.HashMap.Strict as HM
 import Data.IORef
 import Data.IORef.Unboxed
@@ -203,8 +204,11 @@ fetch Connection{..} req onInstant onDelayed'e = do
   -- fetch request. If anything goes wrong in the middle, we're
   -- certain it'll get removed.
   withSharedResource connStates reqId (newTVarIO WaitingInstant) (\_ -> pure ()) $ \reqVar -> do
+
+    let allowDelayedResponse = isRight onDelayed'e
     -- Send the user request.
-    withMVar connSocket $ \sock -> SB.sendAll sock $ encode $ RawRequest reqId req
+    withMVar connSocket $ \sock -> SB.sendAll sock $ encode
+      $ RawRequest reqId req allowDelayedResponse
     let -- Cancel the request with the server if we catch an
         -- exception, such as user giving up on waiting and killing
         -- the action.
@@ -230,15 +234,11 @@ fetch Connection{..} req onInstant onDelayed'e = do
       Just xs -> onInstant xs
       -- We were asked to wait.
       Nothing -> case onDelayed'e of
-        -- User is dis-interested in waiting for results. Cancel the
-        -- request and run the user-provided action.
-        Left dontWait -> do
-          -- Even if request cancellation fails, that's fine: we
-          -- always want to run the user action. Note that we don't
-          -- use bracket_ here on purpose: we don't want to run the
-          -- user action in a masked context for no reason.
-          cancelRequest `onException` dontWait
-          dontWait
+        -- User is dis-interested in waiting for results. We have
+        -- indicated this in the request itself, therefore we don't
+        -- have to cancel anything and we can just run the default
+        -- user action.
+        Left dontWait -> dontWait
         -- User is interested in waiting, at least for now. Initialise
         -- any context the user may need and then wait for results.
         Right onDelayedOuter -> do
