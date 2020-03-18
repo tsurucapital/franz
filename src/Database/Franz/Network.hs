@@ -119,19 +119,15 @@ connect host port dir = do
         >>= either (throwIO . ClientError) pure
 
   connThread <- flip forkFinally (either throwIO pure) $ forever $ runGetThrow get >>= \case
-    ResponseInstant i -> do
+    Response i -> do
       resp <- runGetThrow getResponse
       withRequest i . traverse $ \case
         WaitingInstant -> pure (Available resp)
+        WaitingDelayed -> pure (Available resp)
         e -> throwSTM $ ClientError $ "Unexpected state on ResponseInstant " ++ show i ++ ": " ++ show e
     ResponseWait i -> withRequest i . traverse $ \case
       WaitingInstant -> pure WaitingDelayed
       e -> throwSTM $ ClientError $ "Unexpected state on ResponseWait " ++ show i ++ ": " ++ show e
-    ResponseDelayed i -> do
-      resp <- runGetThrow getResponse
-      withRequest i . traverse $ \case
-        WaitingDelayed -> pure (Available resp)
-        e -> throwSTM $ ClientError $ "Unexpected state on ResponseDelayed " ++ show i ++ ": " ++ show e
     ResponseError i e -> withRequest i $ \case
       Nothing -> throwSTM e
       Just{} -> pure $ Just (Errored e)

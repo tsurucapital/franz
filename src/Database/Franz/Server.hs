@@ -52,7 +52,7 @@ respond env refThreads path buf vConn = do
         atomically (fmap Right query `catchSTM` (pure . Left)) >>= \case
           Left e -> sendHeader $ ResponseError reqId e
           Right (ready, offsets)
-            | ready -> send (ResponseInstant reqId) stream offsets
+            | ready -> send (Response reqId) stream offsets
             | allowDelayed -> do
               m <- readIORef refThreads
               when (IM.member reqId m) $ throwIO $ MalformedRequest "duplicate request ID"
@@ -64,7 +64,7 @@ respond env refThreads path buf vConn = do
                     (ready', offsets') <- query
                     check ready'
                     pure offsets'
-                  send (ResponseDelayed reqId) stream offsets'
+                  send (Response reqId) stream offsets'
               writeIORef refThreads $! IM.insert reqId tid m
             -- Response is not ready but the user indicated that they
             -- are not interested in waiting either. While we have no
