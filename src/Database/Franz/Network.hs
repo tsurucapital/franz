@@ -22,21 +22,22 @@ module Database.Franz.Network
 
 import Control.Concurrent
 import Control.Concurrent.Async
+import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad
-import Control.Concurrent.STM
-import Database.Franz.Protocol
-import qualified Data.IntMap.Strict as IM
-import Data.IORef
-import Data.Int (Int64)
-import Data.Serialize hiding (getInt64le)
-import Database.Franz.Internal
 import qualified Data.ByteString.Char8 as B
 import qualified Data.HashMap.Strict as HM
+import Data.IORef
+import Data.IORef.Unboxed
+import Data.Int (Int64)
+import qualified Data.IntMap.Strict as IM
+import Data.Serialize hiding (getInt64le)
 import qualified Data.Vector as V
 import qualified Data.Vector.Generic.Mutable as VGM
-import qualified Network.Socket.ByteString as SB
+import Database.Franz.Internal
+import Database.Franz.Protocol
 import qualified Network.Socket as S
+import qualified Network.Socket.ByteString as SB
 
 -- The protocol
 --
@@ -58,7 +59,7 @@ import qualified Network.Socket as S
 
 data Connection = Connection
   { connSocket :: MVar S.Socket
-  , connReqId :: TVar Int
+  , connReqId :: !Counter
   , connStates :: TVar (IM.IntMap (ResponseStatus Contents))
   , connThread :: !ThreadId
   }
@@ -86,7 +87,7 @@ connect host port dir = do
     e -> throwIO $ ClientError $ "Database.Franz.Network.connect: Unexpected response: " ++ show e
 
   connSocket <- newMVar sock
-  connReqId <- newTVarIO 0
+  connReqId <- newCounter 0
   connStates <- newTVarIO IM.empty
   buf <- newIORef B.empty
   connThread <- flip forkFinally (either throwIO pure) $ forever
@@ -181,11 +182,8 @@ fetch :: Connection
   -- action is ran on delayed result when it becomes available.
   -> IO r
 fetch Connection{..} req onInstant onDelayed'e = do
-  reqId <- atomically $ do
-    i <- readTVar connReqId
-    writeTVar connReqId $! i + 1
-    modifyTVar' connStates $ IM.insert i WaitingInstant
-    return i
+  reqId <- atomicAddCounter connReqId 1
+  atomically $ modifyTVar' connStates $ IM.insert reqId WaitingInstant
   withMVar connSocket $ \sock -> SB.sendAll sock $ encode $ RawRequest reqId req
   let
     go = do

@@ -50,6 +50,7 @@ library
     , sendfile
     , stm
     , transformers
+    , unboxed-ref
     , vector
     , unordered-containers
   default-language: Haskell2010
