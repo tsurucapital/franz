@@ -2,6 +2,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE TypeFamilies #-}
 module Database.Franz.Network
   ( defaultPort
   , Connection
@@ -26,6 +27,7 @@ import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad
 import qualified Data.ByteString.Char8 as B
+import Data.ConcurrentResourceMap
 import qualified Data.HashMap.Strict as HM
 import Data.IORef
 import Data.IORef.Unboxed
@@ -57,10 +59,21 @@ import qualified Network.Socket.ByteString as SB
 --   | ----  RawClean j ---->   |
 --   | ----  RawClean k ---->   |
 
+newtype ConnStateMap v = ConnStateMap (IM.IntMap v)
+
+instance ResourceMap ConnStateMap where
+  type Key ConnStateMap = Int
+  empty = ConnStateMap IM.empty
+  delete k (ConnStateMap m) = ConnStateMap (IM.delete k m)
+  insert k v (ConnStateMap m) = ConnStateMap (IM.insert k v m)
+  lookup k (ConnStateMap m) = IM.lookup k m
+
 data Connection = Connection
   { connSocket :: MVar S.Socket
   , connReqId :: !Counter
-  , connStates :: TVar (IM.IntMap (ResponseStatus Contents))
+  , connStates :: !(ConcurrentResourceMap
+                     ConnStateMap
+                     (TVar (ResponseStatus Contents)))
   , connThread :: !ThreadId
   }
 
@@ -88,37 +101,40 @@ connect host port dir = do
 
   connSocket <- newMVar sock
   connReqId <- newCounter 0
-  connStates <- newTVarIO IM.empty
+  connStates <- newResourceMap
   buf <- newIORef B.empty
+  let withRequest i f = withInitialisedResource connStates i (\_ -> pure ()) $ \case
+        Nothing -> case f Nothing of
+          Nothing -> pure ()
+          Just (Left e) -> throwIO e
+          -- It produced a value but we can't do anything with it.
+          -- Just throw it away.
+          Just Right{} -> pure ()
+        Just reqVar -> atomically $ do
+          st <- readTVar reqVar
+          case f (Just st) of
+            Nothing -> pure ()
+            Just (Left e) -> throwSTM e
+            Just (Right v) -> writeTVar reqVar v
+
   connThread <- flip forkFinally (either throwIO pure) $ forever
-    $ (>>=either (throwIO . ClientError) atomically) $ runGetRecv buf sock $ get >>= \case
+    $ (>>=either (throwIO . ClientError) id) $ runGetRecv buf sock $ get >>= \case
       ResponseInstant i -> do
         resp <- getResponse
-        return $ do
-          m <- readTVar connStates
-          case IM.lookup i m of
-            Nothing -> pure ()
-            Just WaitingInstant -> writeTVar connStates $! IM.insert i (Available resp) m
-            e -> throwSTM $ ClientError $ "Unexpected state on ResponseInstant " ++ show i ++ ": " ++ show e
-      ResponseWait i -> return $ do
-        m <- readTVar connStates
-        case IM.lookup i m of
-          Nothing -> pure ()
-          Just WaitingInstant -> writeTVar connStates $! IM.insert i WaitingDelayed m
-          e -> throwSTM $ ClientError $ "Unexpected state on ResponseWait " ++ show i ++ ": " ++ show e
+        return $ withRequest i $ fmap $ \case
+          WaitingInstant -> Right (Available resp)
+          e -> Left $ ClientError $ "Unexpected state on ResponseInstant " ++ show i ++ ": " ++ show e
+      ResponseWait i -> return $ withRequest i $ fmap $ \case
+        WaitingInstant -> Right WaitingDelayed
+        e -> Left $ ClientError $ "Unexpected state on ResponseWait " ++ show i ++ ": " ++ show e
       ResponseDelayed i -> do
         resp <- getResponse
-        return $ do
-          m <- readTVar connStates
-          case IM.lookup i m of
-            Nothing -> pure ()
-            Just WaitingDelayed -> writeTVar connStates $! IM.insert i (Available resp) m
-            e -> throwSTM $ ClientError $ "Unexpected state on ResponseDelayed " ++ show i ++ ": " ++ show e
-      ResponseError i e -> return $ do
-        m <- readTVar connStates
-        case IM.lookup i m of
-          Nothing -> throwSTM e
-          Just _ -> writeTVar connStates $! IM.insert i (Errored e) m
+        return $ withRequest i $ fmap $ \case
+          WaitingDelayed -> Right (Available resp)
+          e -> Left $ ClientError $ "Unexpected state on ResponseDelayed " ++ show i ++ ": " ++ show e
+      ResponseError i e -> return $ withRequest i $ \case
+        Nothing -> Just (Left e)
+        Just{} -> Just (Right (Errored e))
   return Connection{..}
 
 disconnect :: Connection -> IO ()
@@ -183,46 +199,61 @@ fetch :: Connection
   -> IO r
 fetch Connection{..} req onInstant onDelayed'e = do
   reqId <- atomicAddCounter connReqId 1
-  atomically $ modifyTVar' connStates $ IM.insert reqId WaitingInstant
-  withMVar connSocket $ \sock -> SB.sendAll sock $ encode $ RawRequest reqId req
-  let
-    go = do
-      m <- readTVar connStates
-      case IM.lookup reqId m of
-        Nothing -> return $ Left V.empty -- fetch ended; nothing to return
-        Just WaitingInstant -> retry -- wait for an instant response
-        Just (Available xs) -> do
-          writeTVar connStates $! IM.delete reqId m
-          return $ Left xs
-        Just WaitingDelayed -> return $ Right $ do
-          m' <- readTVar connStates
-          case IM.lookup reqId m' of
-            Nothing -> return V.empty -- fetch ended; nothing to return
-            Just WaitingDelayed -> retry
-            Just (Available xs) -> do
-              writeTVar connStates $! IM.delete reqId m'
-              return xs
-            Just (Errored e) -> throwSTM e
-            Just WaitingInstant -> throwSTM $ ClientError $ "fetch/WaitingDelayed: unexpected state WaitingInstant"
-        Just (Errored e) -> throwSTM e
+  -- We use a shared resource map here to ensure that we only hold
+  -- onto the share connection state TVar for the duration of making a
+  -- fetch request. If anything goes wrong in the middle, we're
+  -- certain it'll get removed.
+  withSharedResource connStates reqId (newTVarIO WaitingInstant) (\_ -> pure ()) $ \reqVar -> do
+    -- Send the user request.
+    withMVar connSocket $ \sock -> SB.sendAll sock $ encode $ RawRequest reqId req
+    let -- Cancel the request with the server if we catch an
+        -- exception, such as user giving up on waiting and killing
+        -- the action.
+      cancelRequest = withMVar connSocket $ \sock ->
+        SB.sendAll sock $ encode $ RawClean reqId
 
-  let run = atomically go >>= \case
-        Left xs -> onInstant xs
-        Right waitDelayed -> case onDelayed'e of
-          -- User is not interested in waiting for delayed results.
-          Left dontWait -> dontWait
-          -- Run user's action.
-          Right onDelayedOuter -> do
-            f <- onDelayedOuter
-            atomically waitDelayed >>= f
+      getInstant = readTVar reqVar >>= \case
+        Errored e -> throwSTM e
+        WaitingInstant -> retry -- wait for an instant response
+        Available xs -> return $ Just xs
+        WaitingDelayed -> pure Nothing
 
-  run `finally` do
-    join $ atomically $ do
-      m <- readTVar connStates
-      writeTVar connStates $! IM.delete reqId m
-      -- If the response arrived, no need to send a clean request
-      return $ when (IM.member reqId m)
-        $ withMVar connSocket $ \sock -> SB.sendAll sock $ encode $ RawClean reqId
+      getDelayed = readTVar reqVar >>= \case
+        WaitingDelayed -> retry
+        Available xs -> return xs
+        Errored e -> throwSTM e
+        WaitingInstant -> throwSTM $ ClientError $
+          "fetch/WaitingDelayed: unexpected state WaitingInstant"
+
+    instant'm <- atomically getInstant `onException` cancelRequest
+    case instant'm of
+      -- We got an answer instantly, run user-callback.
+      Just xs -> onInstant xs
+      -- We were asked to wait.
+      Nothing -> case onDelayed'e of
+        -- User is dis-interested in waiting for results. Cancel the
+        -- request and run the user-provided action.
+        Left dontWait -> do
+          -- Even if request cancellation fails, that's fine: we
+          -- always want to run the user action. Note that we don't
+          -- use bracket_ here on purpose: we don't want to run the
+          -- user action in a masked context for no reason.
+          cancelRequest `onException` dontWait
+          dontWait
+        -- User is interested in waiting, at least for now. Initialise
+        -- any context the user may need and then wait for results.
+        Right onDelayedOuter -> do
+          -- Get result handler. If this action fails, we want to
+          -- cancel the request as we obviously won't be able to
+          -- handle any results anyway.
+          onDelayedResult <- onDelayedOuter `onException` cancelRequest
+          -- Actually wait for the result. If we fail (such as by user
+          -- killing the fetch action via a timeout), cancel the
+          -- request as we're no longer able to handle it even if it
+          -- comes in.
+          delayedResult <- atomically getDelayed `onException` cancelRequest
+          -- We got the result, we can finally handle it.
+          onDelayedResult delayedResult
 
 -- | Send a single query and wait for the result. If it timeouts, it returns an empty list.
 fetchSimple :: Connection
