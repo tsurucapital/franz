@@ -54,8 +54,6 @@ respond env refThreads path buf vConn = do
           Right (ready, offsets)
             | ready -> send (Response reqId) stream offsets
             | allowDelayed -> do
-              m <- readIORef refThreads
-              when (IM.member reqId m) $ throwIO $ MalformedRequest "duplicate request ID"
               tid <- flip forkFinally pop $ bracket_
                 (atomically $ addActivity stream)
                 (removeActivity stream) $ do
@@ -65,7 +63,11 @@ respond env refThreads path buf vConn = do
                     check ready'
                     pure offsets'
                   send (Response reqId) stream offsets'
-              writeIORef refThreads $! IM.insert reqId tid m
+              -- Store the thread ID of the thread yielding a future
+              -- response such that we can kill it mid-way if user
+              -- sends a cancel request or we're killed with an
+              -- exception.
+              atomicModifyIORef' refThreads $ \m -> (IM.insert reqId tid m, ())
             -- Response is not ready but the user indicated that they
             -- are not interested in waiting either. While we have no
             -- work left to do, we do want to send a message back
