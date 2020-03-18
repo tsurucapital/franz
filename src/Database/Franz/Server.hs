@@ -3,6 +3,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE TypeFamilies #-}
 module Database.Franz.Server
   ( Settings(..)
   , startServer
@@ -92,6 +93,18 @@ data Settings = Settings
   , archivePrefix :: Maybe FilePath
   }
 
+newtype MountMap v = MountMap (HM.HashMap FilePath v)
+
+instance ResourceMap MountMap where
+  type Key MountMap = FilePath
+  empty = MountMap mempty
+  delete k (MountMap m) = MountMap (HM.delete k m)
+  insert k v (MountMap m) = MountMap (HM.insert k v m)
+  lookup k (MountMap m) = HM.lookup k m
+
+newMountMap :: IO (ConcurrentResourceMap MountMap ProcessHandle)
+newMountMap = newResourceMap
+
 startServer
     :: Settings
     -> IO ()
@@ -100,7 +113,7 @@ startServer Settings{..} = withFranzReader livePrefix $ \franzReader -> do
   hSetBuffering stderr LineBuffering
   _ <- forkIO $ reaper reapInterval streamLifetime franzReader
 
-  vMounts <- newResourceMap
+  vMounts <- newMountMap
 
   let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICHOST, S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
   addr:_ <- S.getAddrInfo (Just hints) (Just "0.0.0.0") (Just $ show port)
