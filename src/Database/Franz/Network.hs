@@ -19,15 +19,13 @@ module Database.Franz.Network
   , fetch
   , fetchTraverse
   , fetchSimple
-  , atomicallyWithin
   , FranzException(..)) where
 
 import Control.Concurrent
+import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
-import Control.Monad.Trans.Cont (ContT(..))
 import Control.Concurrent.STM
-import Control.Concurrent.STM.Delay
 import Database.Franz.Protocol
 import qualified Data.IntMap.Strict as IM
 import Data.IORef
@@ -171,13 +169,19 @@ getResponse = do
                 return vres
 
 -- | Fetch requested data from the server.
--- Termination of the continuation cancels the request, allowing flexible
--- control of its lifetime.
+--
+-- Termination of 'fetch' continuation cancels the request, allowing
+-- flexible control of its lifetime.
 fetch :: Connection
   -> Query
-  -> (STM Response -> IO r) -- ^ running the STM action blocks until the response arrives
+  -> (Contents -> IO r)
+  -- ^ Action to run on results that are available instantly.
+  -> Either (IO r) (IO (Contents -> IO r))
+  -- ^ Action to run if results are delayed. If we don't want to wait
+  -- for delayed results, use 'Left' as a default action. 'Right'
+  -- action is ran on delayed result when it becomes available.
   -> IO r
-fetch Connection{..} req cont = do
+fetch Connection{..} req onInstant onDelayed'e = do
   reqId <- atomically $ do
     i <- readTVar connReqId
     writeTVar connReqId $! i + 1
@@ -204,7 +208,18 @@ fetch Connection{..} req cont = do
             Just (Errored e) -> throwSTM e
             Just WaitingInstant -> throwSTM $ ClientError $ "fetch/WaitingDelayed: unexpected state WaitingInstant"
         Just (Errored e) -> throwSTM e
-  cont go `finally` do
+
+  let run = atomically go >>= \case
+        Left xs -> onInstant xs
+        Right waitDelayed -> case onDelayed'e of
+          -- User is not interested in waiting for delayed results.
+          Left dontWait -> dontWait
+          -- Run user's action.
+          Right onDelayedOuter -> do
+            f <- onDelayedOuter
+            atomically waitDelayed >>= f
+
+  run `finally` do
     join $ atomically $ do
       m <- readTVar connStates
       writeTVar connStates $! IM.delete reqId m
@@ -218,25 +233,36 @@ fetch Connection{..} req cont = do
 --
 -- Generalisation to Traversable guarantees that the response preserves the
 -- shape of the request.
-fetchTraverse :: Traversable t => Connection -> t Query -> (STM (Either (t Contents) (STM (t Contents))) -> IO r) -> IO r
-fetchTraverse conn reqs = runContT $ do
-  tresps <- traverse (ContT . fetch conn) reqs
-  return $ do
-    resps <- sequence tresps
-    case traverse (either Just (const Nothing)) resps of
-      Just instant -> return $ Left instant
-      Nothing -> return $ Right $ traverse (either pure id) resps
+fetchTraverse
+  :: Traversable t
+  => Connection
+  -> t Query
+  -> (Contents -> IO r)
+  -> Either (IO r) (IO (Contents -> IO r))
+  -> IO (t r)
+fetchTraverse conn reqs onInstant onDelayed = forConcurrently reqs $ \req ->
+  fetch conn req onInstant onDelayed
 
 -- | Send a single query and wait for the result. If it timeouts, it returns an empty list.
 fetchSimple :: Connection
   -> Int -- ^ timeout in microseconds
   -> Query
   -> IO Contents
-fetchSimple conn timeout req = fetch conn req (fmap (maybe mempty id) . atomicallyWithin timeout . awaitResponse)
-
-atomicallyWithin :: Int -- ^ timeout in microseconds
-  -> STM a
-  -> IO (Maybe a)
-atomicallyWithin timeout m = do
-  d <- newDelay timeout
-  atomically $ fmap Just m `orElse` (Nothing <$ waitDelay d)
+fetchSimple conn t req = do
+  startedBlocking <- newEmptyMVar
+  let blockingFetch = fetch conn req pure $ Right $ do
+        -- Tell the outer world that we're going to block waiting for
+        -- an answer.
+        putMVar startedBlocking ()
+        pure pure
+      -- After fetch started blocking (waiting for delayed response),
+      -- race it with a thread that times out after @t@.
+      blockingTimeout = do
+        takeMVar startedBlocking
+        threadDelay t
+        pure mempty
+  -- 'race' ensures to re-throw exceptions thrown by first action to
+  -- terminate. This means that even if 'fetch' terminates early, we
+  -- won't deadlock waiting for 'startedBlocking' as the other action
+  -- will be 'cancel'led.
+  either id id <$> race blockingFetch blockingTimeout
