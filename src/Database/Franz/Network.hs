@@ -17,7 +17,6 @@ module Database.Franz.Network
   , SomeIndexMap
   , Contents
   , fetch
-  , fetchTraverse
   , fetchSimple
   , FranzException(..)) where
 
@@ -226,22 +225,6 @@ fetch Connection{..} req onInstant onDelayed'e = do
       -- If the response arrived, no need to send a clean request
       return $ when (IM.member reqId m)
         $ withMVar connSocket $ \sock -> SB.sendAll sock $ encode $ RawClean reqId
-
-
--- | Queries in traversable @t@ form an atomic request. The response will become
--- available once all the elements are available.
---
--- Generalisation to Traversable guarantees that the response preserves the
--- shape of the request.
-fetchTraverse
-  :: Traversable t
-  => Connection
-  -> t Query
-  -> (Contents -> IO r)
-  -> Either (IO r) (IO (Contents -> IO r))
-  -> IO (t r)
-fetchTraverse conn reqs onInstant onDelayed = forConcurrently reqs $ \req ->
-  fetch conn req onInstant onDelayed
 
 -- | Send a single query and wait for the result. If it timeouts, it returns an empty list.
 fetchSimple :: Connection
