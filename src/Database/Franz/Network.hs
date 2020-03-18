@@ -103,38 +103,37 @@ connect host port dir = do
   connReqId <- newCounter 0
   connStates <- newResourceMap
   buf <- newIORef B.empty
-  let withRequest i f = withInitialisedResource connStates i (\_ -> pure ()) $ \case
-        Nothing -> case f Nothing of
-          Nothing -> pure ()
-          Just (Left e) -> throwIO e
-          -- It produced a value but we can't do anything with it.
-          -- Just throw it away.
-          Just Right{} -> pure ()
-        Just reqVar -> atomically $ do
-          st <- readTVar reqVar
-          case f (Just st) of
-            Nothing -> pure ()
-            Just (Left e) -> throwSTM e
-            Just (Right v) -> writeTVar reqVar v
+  let -- Get a reference to shared state for the request if it exists.
+      withRequest i f = withInitialisedResource connStates i (\_ -> pure ()) $ \case
+        Nothing ->
+          -- If it throws an exception on no value, great, it will
+          -- float out here. If it returns a value, it'll just be
+          -- ignore as we can't do anything with it anyway.
+          void $ atomically (f Nothing)
+        Just reqVar -> atomically $
+          readTVar reqVar >>= f . Just >>= mapM_ (writeTVar reqVar)
 
-  connThread <- flip forkFinally (either throwIO pure) $ forever
-    $ (>>=either (throwIO . ClientError) id) $ runGetRecv buf sock $ get >>= \case
-      ResponseInstant i -> do
-        resp <- getResponse
-        return $ withRequest i $ fmap $ \case
-          WaitingInstant -> Right (Available resp)
-          e -> Left $ ClientError $ "Unexpected state on ResponseInstant " ++ show i ++ ": " ++ show e
-      ResponseWait i -> return $ withRequest i $ fmap $ \case
-        WaitingInstant -> Right WaitingDelayed
-        e -> Left $ ClientError $ "Unexpected state on ResponseWait " ++ show i ++ ": " ++ show e
-      ResponseDelayed i -> do
-        resp <- getResponse
-        return $ withRequest i $ fmap $ \case
-          WaitingDelayed -> Right (Available resp)
-          e -> Left $ ClientError $ "Unexpected state on ResponseDelayed " ++ show i ++ ": " ++ show e
-      ResponseError i e -> return $ withRequest i $ \case
-        Nothing -> Just (Left e)
-        Just{} -> Just (Right (Errored e))
+      runGetThrow :: Get a -> IO a
+      runGetThrow g = runGetRecv buf sock g
+        >>= either (throwIO . ClientError) pure
+
+  connThread <- flip forkFinally (either throwIO pure) $ forever $ runGetThrow get >>= \case
+    ResponseInstant i -> do
+      resp <- runGetThrow getResponse
+      withRequest i . traverse $ \case
+        WaitingInstant -> pure (Available resp)
+        e -> throwSTM $ ClientError $ "Unexpected state on ResponseInstant " ++ show i ++ ": " ++ show e
+    ResponseWait i -> withRequest i . traverse $ \case
+      WaitingInstant -> pure WaitingDelayed
+      e -> throwSTM $ ClientError $ "Unexpected state on ResponseWait " ++ show i ++ ": " ++ show e
+    ResponseDelayed i -> do
+      resp <- runGetThrow getResponse
+      withRequest i . traverse $ \case
+        WaitingDelayed -> pure (Available resp)
+        e -> throwSTM $ ClientError $ "Unexpected state on ResponseDelayed " ++ show i ++ ": " ++ show e
+    ResponseError i e -> withRequest i $ \case
+      Nothing -> throwSTM e
+      Just{} -> pure $ Just (Errored e)
   return Connection{..}
 
 disconnect :: Connection -> IO ()
