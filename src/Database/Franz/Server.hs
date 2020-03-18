@@ -126,7 +126,7 @@ startServer Settings{..} = withFranzReader livePrefix $ \franzReader -> do
   bracket (S.socket (S.addrFamily addr) S.Stream (S.addrProtocol addr)) S.close $ \sock -> do
     S.setSocketOption sock S.ReuseAddr 1
     S.setSocketOption sock S.NoDelay 1
-    S.bind sock $ S.SockAddrInet (fromIntegral port) (S.tupleToHostAddress (0,0,0,0))
+    S.bind sock $ S.addrAddress addr
     S.listen sock S.maxListenQueue
     logServer ["Listening on", show port]
 
