@@ -32,7 +32,6 @@ library
       src
   build-depends:
       base >=4.7 && <5
-    , async
     , bytestring
     , cereal
     , containers
@@ -49,6 +48,7 @@ library
     , retry
     , sendfile
     , stm
+    , stm-delay
     , transformers
     , unboxed-ref
     , vector

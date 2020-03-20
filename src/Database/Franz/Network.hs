@@ -19,16 +19,17 @@ module Database.Franz.Network
   , Contents
   , fetch
   , fetchSimple
+  , atomicallyWithin
   , FranzException(..)) where
 
+import Control.Arrow ((&&&))
 import Control.Concurrent
-import Control.Concurrent.Async
 import Control.Concurrent.STM
+import Control.Concurrent.STM.Delay (newDelay, waitDelay)
 import Control.Exception
 import Control.Monad
 import qualified Data.ByteString.Char8 as B
 import Data.ConcurrentResourceMap
-import Data.Either (isRight)
 import qualified Data.HashMap.Strict as HM
 import Data.IORef
 import Data.IORef.Unboxed
@@ -82,6 +83,8 @@ data ResponseStatus a = WaitingInstant
     | WaitingDelayed
     | Errored !FranzException
     | Available !a
+    -- | The user cancelled the request.
+    | RequestFinished
     deriving (Show, Functor)
 
 withConnection :: String -> S.PortNumber -> B.ByteString -> (Connection -> IO r) -> IO r
@@ -111,8 +114,10 @@ connect host port dir = do
           -- float out here. If it returns a value, it'll just be
           -- ignore as we can't do anything with it anyway.
           void $ atomically (f Nothing)
-        Just reqVar -> atomically $
-          readTVar reqVar >>= f . Just >>= mapM_ (writeTVar reqVar)
+        Just reqVar -> atomically $ readTVar reqVar >>= \case
+          -- If request is finished, do nothing to the content.
+          RequestFinished -> void $ f Nothing
+          s -> f (Just s) >>= mapM_ (writeTVar reqVar)
 
       runGetThrow :: Get a -> IO a
       runGetThrow g = runGetRecv buf sock g
@@ -184,92 +189,73 @@ getResponse = do
 --
 -- Termination of 'fetch' continuation cancels the request, allowing
 -- flexible control of its lifetime.
-fetch :: Connection
+fetch
+  :: Connection
   -> Query
-  -> (Contents -> IO r)
-  -- ^ Action to run on results that are available instantly.
-  -> Either (IO r) (IO (Contents -> IO r))
-  -- ^ Action to run if results are delayed. If we don't want to wait
-  -- for delayed results, use 'Left' as a default action. 'Right'
-  -- action is ran on delayed result when it becomes available.
+  -> (STM Response -> IO r)
+  -- ^ Wait for the response in a blocking manner. You should only run
+  -- the continuation inside a 'fetch' block: leaking the STM action
+  -- and running it outside will result in a 'ClientError' exception.
   -> IO r
-fetch Connection{..} req onInstant onDelayed'e = do
+fetch Connection{..} req cont = do
   reqId <- atomicAddCounter connReqId 1
+
+  let -- When we exit the scope of the request, ensure that we cancel any
+      -- outstanding request and set the appropriate state, lest the user
+      -- leaks the resource and tries to re-run the provided action.
+      cleanupRequest reqVar = do
+        let inFlight WaitingInstant = True
+            inFlight WaitingDelayed = True
+            inFlight _ = False
+        -- Check set the internal state to RequestFinished while
+        -- noting if there's possibly a request still in flight.
+        requestInFlight <- atomically $
+          stateTVar reqVar $ inFlight &&& const RequestFinished
+        when requestInFlight $ withMVar connSocket $ \sock ->
+          SB.sendAll sock $ encode $ RawClean reqId
+
   -- We use a shared resource map here to ensure that we only hold
   -- onto the share connection state TVar for the duration of making a
   -- fetch request. If anything goes wrong in the middle, we're
   -- certain it'll get removed.
-  withSharedResource connStates reqId (newTVarIO WaitingInstant) (\_ -> pure ()) $ \reqVar -> do
-
-    let allowDelayedResponse = isRight onDelayed'e
+  withSharedResource connStates reqId
+    (newTVarIO WaitingInstant)
+    cleanupRequest $ \reqVar -> do
+    let allowDelayedResponse = True {- isRight onDelayed'e -}
     -- Send the user request.
     withMVar connSocket $ \sock -> SB.sendAll sock $ encode
       $ RawRequest reqId req allowDelayedResponse
-    let -- Cancel the request with the server if we catch an
-        -- exception, such as user giving up on waiting and killing
-        -- the action.
-      cancelRequest = withMVar connSocket $ \sock ->
-        SB.sendAll sock $ encode $ RawClean reqId
 
-      getInstant = readTVar reqVar >>= \case
-        Errored e -> throwSTM e
-        WaitingInstant -> retry -- wait for an instant response
-        Available xs -> return $ Just xs
-        WaitingDelayed -> pure Nothing
+    let
+      requestFinished = ClientError "request already finished"
 
       getDelayed = readTVar reqVar >>= \case
+        RequestFinished -> throwSTM requestFinished
         WaitingDelayed -> retry
         Available xs -> return xs
         Errored e -> throwSTM e
         WaitingInstant -> throwSTM $ ClientError $
           "fetch/WaitingDelayed: unexpected state WaitingInstant"
 
-    instant'm <- atomically getInstant `onException` cancelRequest
-    case instant'm of
-      -- We got an answer instantly, run user-callback.
-      Just xs -> onInstant xs
-      -- We were asked to wait.
-      Nothing -> case onDelayed'e of
-        -- User is dis-interested in waiting for results. We have
-        -- indicated this in the request itself, therefore we don't
-        -- have to cancel anything and we can just run the default
-        -- user action.
-        Left dontWait -> dontWait
-        -- User is interested in waiting, at least for now. Initialise
-        -- any context the user may need and then wait for results.
-        Right onDelayedOuter -> do
-          -- Get result handler. If this action fails, we want to
-          -- cancel the request as we obviously won't be able to
-          -- handle any results anyway.
-          onDelayedResult <- onDelayedOuter `onException` cancelRequest
-          -- Actually wait for the result. If we fail (such as by user
-          -- killing the fetch action via a timeout), cancel the
-          -- request as we're no longer able to handle it even if it
-          -- comes in.
-          delayedResult <- atomically getDelayed `onException` cancelRequest
-          -- We got the result, we can finally handle it.
-          onDelayedResult delayedResult
+    -- Run the user's continuation. 'withSharedResource' takes care of
+    -- any clean-up necessary.
+    cont $ readTVar reqVar >>= \case
+      RequestFinished -> throwSTM requestFinished
+      Errored e -> throwSTM e
+      WaitingInstant -> retry -- wait for an instant response
+      Available xs -> pure $ Left xs
+      WaitingDelayed -> pure $ Right getDelayed
 
 -- | Send a single query and wait for the result. If it timeouts, it returns an empty list.
 fetchSimple :: Connection
   -> Int -- ^ timeout in microseconds
   -> Query
   -> IO Contents
-fetchSimple conn t req = do
-  startedBlocking <- newEmptyMVar
-  let blockingFetch = fetch conn req pure $ Right $ do
-        -- Tell the outer world that we're going to block waiting for
-        -- an answer.
-        putMVar startedBlocking ()
-        pure pure
-      -- After fetch started blocking (waiting for delayed response),
-      -- race it with a thread that times out after @t@.
-      blockingTimeout = do
-        takeMVar startedBlocking
-        threadDelay t
-        pure mempty
-  -- 'race' ensures to re-throw exceptions thrown by first action to
-  -- terminate. This means that even if 'fetch' terminates early, we
-  -- won't deadlock waiting for 'startedBlocking' as the other action
-  -- will be 'cancel'led.
-  either id id <$> race blockingFetch blockingTimeout
+fetchSimple conn timeout req = fetch conn req (fmap (maybe mempty id) . atomicallyWithin timeout . awaitResponse)
+
+atomicallyWithin :: Int -- ^ timeout in microseconds
+  -> STM a
+  -> IO (Maybe a)
+atomicallyWithin timeout m = do
+  d <- newDelay timeout
+  atomically $ fmap Just m `orElse` (Nothing <$ waitDelay d)
