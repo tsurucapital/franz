@@ -151,19 +151,24 @@ startServer Settings{..} = withFranzReader livePrefix $ \franzReader -> do
             -- just start a session without thinking about archives
             Nothing -> respondLoop path
             -- Mount a squashfs image and increment the counter
-            Just prefix | src <- prefix </> path -> withSharedResource vMounts path
-              (mountFuse src (livePrefix </> path))
-              (\fuse -> do
-                -- close the last client's streams
-                streams <- atomically $ do
-                  streams <- readTVar $ vStreams franzReader
-                  writeTVar (vStreams franzReader) $ HM.delete path streams
-                  pure streams
-                forM_ (HM.lookup path streams) $ mapM_ closeStream
-                killFuse fuse (livePrefix </> path) `finally` do
-                  pid <- getPid fuse
-                  forM_ pid $ \p -> logServer ["Undead squashfuse detected:", show p])
-              (const $ respondLoop path)
+            Just prefix | src <- prefix </> path -> do
+              -- ^ check if an archive exists
+              exist <- doesFileExist src
+              if exist
+                then withSharedResource vMounts path
+                  (mountFuse src (livePrefix </> path))
+                  (\fuse -> do
+                    -- close the last client's streams
+                    streams <- atomically $ do
+                      streams <- readTVar $ vStreams franzReader
+                      writeTVar (vStreams franzReader) $ HM.delete path streams
+                      pure streams
+                    forM_ (HM.lookup path streams) $ mapM_ closeStream
+                    killFuse fuse (livePrefix </> path) `finally` do
+                      pid <- getPid fuse
+                      forM_ pid $ \p -> logServer ["Undead squashfuse detected:", show p])
+                  (const $ respondLoop path)
+                else respondLoop path
         )
         $ \result -> do
           case result of
