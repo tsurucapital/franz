@@ -52,10 +52,8 @@ data Query = Query
   } deriving (Show, Generic)
 instance Serialize Query
 
-type AllowDelayedResponse = Bool
-
 data RawRequest
-  = RawRequest !ResponseId !Query !AllowDelayedResponse
+  = RawRequest !ResponseId !Query
   | RawClean !ResponseId deriving Generic
 instance Serialize RawRequest
 

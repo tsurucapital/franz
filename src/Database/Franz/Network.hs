@@ -221,10 +221,9 @@ fetch Connection{..} req cont = do
   withSharedResource connStates reqId
     (newTVarIO WaitingInstant)
     cleanupRequest $ \reqVar -> do
-    let allowDelayedResponse = True {- isRight onDelayed'e -}
     -- Send the user request.
     withMVar connSocket $ \sock -> SB.sendAll sock $ encode
-      $ RawRequest reqId req allowDelayedResponse
+      $ RawRequest reqId req
 
     let
       requestFinished = ClientError "request already finished"

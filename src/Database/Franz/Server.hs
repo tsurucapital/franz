@@ -42,7 +42,7 @@ respond :: FranzReader
 respond env refThreads path buf vConn = do
   recvConn <- readMVar vConn
   runGetRecv buf recvConn get >>= \case
-    Right (RawRequest reqId req allowDelayed) -> do
+    Right (RawRequest reqId req) -> do
       let pop result = do
             case result of
               Left ex | Just e <- fromException ex -> sendHeader $ ResponseError reqId e
@@ -53,7 +53,7 @@ respond env refThreads path buf vConn = do
           Left e -> sendHeader $ ResponseError reqId e
           Right (ready, offsets)
             | ready -> send (Response reqId) stream offsets
-            | allowDelayed -> do
+            | otherwise -> do
               tid <- flip forkFinally pop $ bracket_
                 (atomically $ addActivity stream)
                 (removeActivity stream) $ do
