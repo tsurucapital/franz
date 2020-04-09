@@ -34,12 +34,14 @@ import System.IO
 import System.Process (ProcessHandle, spawnProcess, cleanupProcess,
   waitForProcess, getProcessExitCode, getPid)
 
-respond :: FranzReader
-  -> IORef (IM.IntMap ThreadId)
-  -> FilePath
-  -> IORef B.ByteString
-  -> MVar S.Socket -> IO ()
-respond env refThreads path buf vConn = do
+respond :: FilePath
+  -> FranzReader
+  -> IORef (IM.IntMap ThreadId) -- ^ thread pool
+  -> FilePath -- ^ path
+  -> IORef B.ByteString -- ^ buffer
+  -> MVar S.Socket
+  -> IO ()
+respond prefix env refThreads path buf vConn = do
   recvConn <- readMVar vConn
   runGetRecv buf recvConn get >>= \case
     Right (RawRequest reqId req) -> do
@@ -48,7 +50,7 @@ respond env refThreads path buf vConn = do
               Left ex | Just e <- fromException ex -> sendHeader $ ResponseError reqId e
               _ -> pure ()
             `finally` popThread reqId
-      handleQuery env path req $ \stream query -> do
+      handleQuery prefix env path req $ \stream query -> do
         atomically (fmap Right query `catchSTM` (pure . Left)) >>= \case
           Left e -> sendHeader $ ResponseError reqId e
           Right (ready, offsets)
@@ -99,6 +101,7 @@ data Settings = Settings
   , port :: S.PortNumber
   , livePrefix :: FilePath
   , archivePrefix :: Maybe FilePath
+  , mountPrefix :: FilePath
   }
 
 newtype MountMap v = MountMap (HM.HashMap FilePath v)
@@ -116,7 +119,11 @@ newMountMap = newResourceMap
 startServer
     :: Settings
     -> IO ()
-startServer Settings{..} = withFranzReader livePrefix $ \franzReader -> do
+startServer Settings{..} = withFranzReader $ \franzReader -> do
+
+  forM_ archivePrefix $ \path -> do
+    e <- doesDirectoryExist path
+    unless e $ error $ "archive prefix " ++ path ++ " doesn't exist"
 
   hSetBuffering stderr LineBuffering
   _ <- forkIO $ reaper reapInterval streamLifetime franzReader
@@ -135,12 +142,12 @@ startServer Settings{..} = withFranzReader livePrefix $ \franzReader -> do
     forever $ do
       (conn, connAddr) <- S.accept sock
       buf <- newIORef B.empty
-      let respondLoop path = do
+      let respondLoop prefix path = do
             SB.sendAll conn apiVersion
             logServer [show connAddr, show path]
             ref <- newIORef IM.empty
             vConn <- newMVar conn
-            forever (respond franzReader ref path buf vConn) `finally` do
+            forever (respond prefix franzReader ref path buf vConn) `finally` do
               readIORef ref >>= mapM_ killThread
 
       forkFinally (runGetRecv buf conn get >>= \case
@@ -149,21 +156,28 @@ startServer Settings{..} = withFranzReader livePrefix $ \franzReader -> do
           let path = B.unpack pathBS
           case archivePrefix of
             -- just start a session without thinking about archives
-            Nothing -> respondLoop path
+            Nothing -> respondLoop livePrefix path
             -- Mount a squashfs image and increment the counter
-            Just prefix | src <- prefix </> path -> withSharedResource vMounts path
-              (mountFuse src (livePrefix </> path))
-              (\fuse -> do
-                -- close the last client's streams
-                streams <- atomically $ do
-                  streams <- readTVar $ vStreams franzReader
-                  writeTVar (vStreams franzReader) $ HM.delete path streams
-                  pure streams
-                forM_ (HM.lookup path streams) $ mapM_ closeStream
-                killFuse fuse (livePrefix </> path) `finally` do
-                  pid <- getPid fuse
-                  forM_ pid $ \p -> logServer ["Undead squashfuse detected:", show p])
-              (const $ respondLoop path)
+            Just prefix | src <- prefix </> path -> do
+              -- ^ check if an archive exists
+              exist <- doesFileExist src
+              if exist
+                then withSharedResource vMounts path
+                  (mountFuse src (mountPrefix </> path))
+                  (\fuse -> do
+                    -- close the last client's streams
+                    streams <- atomically $ do
+                      streams <- readTVar $ vStreams franzReader
+                      writeTVar (vStreams franzReader) $ HM.delete path streams
+                      pure streams
+                    forM_ (HM.lookup path streams) $ mapM_ closeStream
+                    killFuse fuse (mountPrefix </> path) `finally` do
+                      pid <- getPid fuse
+                      forM_ pid $ \p -> logServer ["Undead squashfuse detected:", show p])
+                  (const $ respondLoop mountPrefix path)
+                else do
+                  logServer ["Archive", src, "doesn't exist; falling back to live streams"]
+                  respondLoop livePrefix path
         )
         $ \result -> do
           case result of
