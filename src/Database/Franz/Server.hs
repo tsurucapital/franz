@@ -3,6 +3,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE TypeFamilies #-}
 module Database.Franz.Server
   ( Settings(..)
   , startServer
@@ -33,12 +34,14 @@ import System.IO
 import System.Process (ProcessHandle, spawnProcess, cleanupProcess,
   waitForProcess, getProcessExitCode, getPid)
 
-respond :: FranzReader
-  -> IORef (IM.IntMap ThreadId)
-  -> FilePath
-  -> IORef B.ByteString
-  -> MVar S.Socket -> IO ()
-respond env refThreads path buf vConn = do
+respond :: FilePath
+  -> FranzReader
+  -> IORef (IM.IntMap ThreadId) -- ^ thread pool
+  -> FilePath -- ^ path
+  -> IORef B.ByteString -- ^ buffer
+  -> MVar S.Socket
+  -> IO ()
+respond prefix env refThreads path buf vConn = do
   recvConn <- readMVar vConn
   runGetRecv buf recvConn get >>= \case
     Right (RawRequest reqId req) -> do
@@ -47,14 +50,12 @@ respond env refThreads path buf vConn = do
               Left ex | Just e <- fromException ex -> sendHeader $ ResponseError reqId e
               _ -> pure ()
             `finally` popThread reqId
-      handleQuery env path req $ \stream query -> do
+      handleQuery prefix env path req $ \stream query -> do
         atomically (fmap Right query `catchSTM` (pure . Left)) >>= \case
           Left e -> sendHeader $ ResponseError reqId e
           Right (ready, offsets)
-            | ready -> send (ResponseInstant reqId) stream offsets
+            | ready -> send (Response reqId) stream offsets
             | otherwise -> do
-              m <- readIORef refThreads
-              when (IM.member reqId m) $ throwIO $ MalformedRequest "duplicate request ID"
               tid <- flip forkFinally pop $ bracket_
                 (atomically $ addActivity stream)
                 (removeActivity stream) $ do
@@ -63,8 +64,18 @@ respond env refThreads path buf vConn = do
                     (ready', offsets') <- query
                     check ready'
                     pure offsets'
-                  send (ResponseDelayed reqId) stream offsets'
-              writeIORef refThreads $! IM.insert reqId tid m
+                  send (Response reqId) stream offsets'
+              -- Store the thread ID of the thread yielding a future
+              -- response such that we can kill it mid-way if user
+              -- sends a cancel request or we're killed with an
+              -- exception.
+              atomicModifyIORef' refThreads $ \m -> (IM.insert reqId tid m, ())
+            -- Response is not ready but the user indicated that they
+            -- are not interested in waiting either. While we have no
+            -- work left to do, we do want to send a message back
+            -- saying the response would be a delayed one so that the
+            -- user can give up waiting.
+            | otherwise -> sendHeader $ ResponseWait reqId
       `catch` \e -> sendHeader $ ResponseError reqId e
     Right (RawClean reqId) -> do
       tid <- popThread reqId
@@ -90,36 +101,53 @@ data Settings = Settings
   , port :: S.PortNumber
   , livePrefix :: FilePath
   , archivePrefix :: Maybe FilePath
+  , mountPrefix :: FilePath
   }
+
+newtype MountMap v = MountMap (HM.HashMap FilePath v)
+
+instance ResourceMap MountMap where
+  type Key MountMap = FilePath
+  empty = MountMap mempty
+  delete k (MountMap m) = MountMap (HM.delete k m)
+  insert k v (MountMap m) = MountMap (HM.insert k v m)
+  lookup k (MountMap m) = HM.lookup k m
+
+newMountMap :: IO (ConcurrentResourceMap MountMap ProcessHandle)
+newMountMap = newResourceMap
 
 startServer
     :: Settings
     -> IO ()
-startServer Settings{..} = withFranzReader livePrefix $ \franzReader -> do
+startServer Settings{..} = withFranzReader $ \franzReader -> do
+
+  forM_ archivePrefix $ \path -> do
+    e <- doesDirectoryExist path
+    unless e $ error $ "archive prefix " ++ path ++ " doesn't exist"
 
   hSetBuffering stderr LineBuffering
   _ <- forkIO $ reaper reapInterval streamLifetime franzReader
 
-  vMounts <- newResourceMap
+  vMounts <- newMountMap
 
   let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICHOST, S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
   addr:_ <- S.getAddrInfo (Just hints) (Just "0.0.0.0") (Just $ show port)
   bracket (S.socket (S.addrFamily addr) S.Stream (S.addrProtocol addr)) S.close $ \sock -> do
     S.setSocketOption sock S.ReuseAddr 1
     S.setSocketOption sock S.NoDelay 1
-    S.bind sock $ S.SockAddrInet (fromIntegral port) (S.tupleToHostAddress (0,0,0,0))
+    S.bind sock $ S.addrAddress addr
     S.listen sock S.maxListenQueue
     logServer ["Listening on", show port]
 
     forever $ do
       (conn, connAddr) <- S.accept sock
       buf <- newIORef B.empty
-      let respondLoop path = do
+      let respondLoop prefix path = do
             SB.sendAll conn apiVersion
             logServer [show connAddr, show path]
             ref <- newIORef IM.empty
             vConn <- newMVar conn
-            forever (respond franzReader ref path buf vConn) `finally` do
+            forever (respond prefix franzReader ref path buf vConn) `finally` do
               readIORef ref >>= mapM_ killThread
 
       forkFinally (runGetRecv buf conn get >>= \case
@@ -128,21 +156,28 @@ startServer Settings{..} = withFranzReader livePrefix $ \franzReader -> do
           let path = B.unpack pathBS
           case archivePrefix of
             -- just start a session without thinking about archives
-            Nothing -> respondLoop path
+            Nothing -> respondLoop livePrefix path
             -- Mount a squashfs image and increment the counter
-            Just prefix | src <- prefix </> path -> withSharedResource vMounts path
-              (mountFuse src (livePrefix </> path))
-              (\fuse -> do
-                -- close the last client's streams
-                streams <- atomically $ do
-                  streams <- readTVar $ vStreams franzReader
-                  writeTVar (vStreams franzReader) $ HM.delete path streams
-                  pure streams
-                forM_ (HM.lookup path streams) $ mapM_ closeStream
-                killFuse fuse (livePrefix </> path) `finally` do
-                  pid <- getPid fuse
-                  forM_ pid $ \p -> logServer ["Undead squashfuse detected:", show p])
-              (const $ respondLoop path)
+            Just prefix | src <- prefix </> path -> do
+              -- ^ check if an archive exists
+              exist <- doesFileExist src
+              if exist
+                then withSharedResource vMounts path
+                  (mountFuse src (mountPrefix </> path))
+                  (\fuse -> do
+                    -- close the last client's streams
+                    streams <- atomically $ do
+                      streams <- readTVar $ vStreams franzReader
+                      writeTVar (vStreams franzReader) $ HM.delete path streams
+                      pure streams
+                    forM_ (HM.lookup path streams) $ mapM_ closeStream
+                    killFuse fuse (mountPrefix </> path) `finally` do
+                      pid <- getPid fuse
+                      forM_ pid $ \p -> logServer ["Undead squashfuse detected:", show p])
+                  (const $ respondLoop mountPrefix path)
+                else do
+                  logServer ["Archive", src, "doesn't exist; falling back to live streams"]
+                  respondLoop livePrefix path
         )
         $ \result -> do
           case result of

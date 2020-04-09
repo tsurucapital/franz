@@ -52,16 +52,16 @@ data Query = Query
   } deriving (Show, Generic)
 instance Serialize Query
 
-data RawRequest = RawRequest !ResponseId !Query
-    | RawClean !ResponseId deriving Generic
+data RawRequest
+  = RawRequest !ResponseId !Query
+  | RawClean !ResponseId deriving Generic
 instance Serialize RawRequest
 
 type ResponseId = Int
 
-data ResponseHeader = ResponseInstant !ResponseId
+data ResponseHeader = Response !ResponseId
     -- ^ response ID, number of streams; there are items satisfying the query
     | ResponseWait !ResponseId -- ^ response ID; requested elements are not available right now
-    | ResponseDelayed !ResponseId -- ^ response ID, number of streams; items are available
     | ResponseError !ResponseId !FranzException -- ^ something went wrong
     deriving (Show, Generic)
 instance Serialize ResponseHeader

@@ -146,7 +146,6 @@ splitR i m = let (l, p, r) = IM.splitLookup i m in (l, maybe id (IM.insert i) p 
 data FranzReader = FranzReader
   { watchManager :: WatchManager
   , vStreams :: TVar (HM.HashMap FilePath (HM.HashMap B.ByteString Stream))
-  , prefix :: FilePath
   }
 
 data ReaperState = ReaperState
@@ -231,16 +230,18 @@ reaper int life FranzReader{..} = forever $ do
 
   threadDelay $ floor $ int * 1e6
 
-withFranzReader :: FilePath -> (FranzReader -> IO ()) -> IO ()
-withFranzReader prefix k = do
+withFranzReader :: (FranzReader -> IO ()) -> IO ()
+withFranzReader k = do
   vStreams <- newTVarIO HM.empty
   withManager $ \watchManager -> k FranzReader{..}
 
-handleQuery :: FranzReader
-  -> FilePath
+handleQuery :: FilePath -- ^ prefix
+  -> FranzReader
+  -> FilePath -- ^ directory
   -> Query
   -> (Stream -> STM (Bool, QueryResult) -> IO r) -> IO r
-handleQuery FranzReader{..} dir (Query name begin_ end_ rt) cont = bracket acquire removeActivity
+handleQuery prefix FranzReader{..} dir (Query name begin_ end_ rt) cont
+  = bracket acquire removeActivity
   $ \stream@Stream{..} -> cont stream $ do
     readTVar vCaughtUp >>= check
     allOffsets <- readTVar vOffsets

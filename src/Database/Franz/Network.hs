@@ -2,6 +2,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE TypeFamilies #-}
 module Database.Franz.Network
   ( defaultPort
   , Connection
@@ -17,29 +18,30 @@ module Database.Franz.Network
   , SomeIndexMap
   , Contents
   , fetch
-  , fetchTraverse
   , fetchSimple
   , atomicallyWithin
   , FranzException(..)) where
 
+import Control.Arrow ((&&&))
 import Control.Concurrent
+import Control.Concurrent.STM
+import Control.Concurrent.STM.Delay (newDelay, waitDelay)
 import Control.Exception
 import Control.Monad
-import Control.Monad.Trans.Cont (ContT(..))
-import Control.Concurrent.STM
-import Control.Concurrent.STM.Delay
-import Database.Franz.Protocol
-import qualified Data.IntMap.Strict as IM
-import Data.IORef
-import Data.Int (Int64)
-import Data.Serialize hiding (getInt64le)
-import Database.Franz.Internal
 import qualified Data.ByteString.Char8 as B
+import Data.ConcurrentResourceMap
 import qualified Data.HashMap.Strict as HM
+import Data.IORef
+import Data.IORef.Unboxed
+import Data.Int (Int64)
+import qualified Data.IntMap.Strict as IM
+import Data.Serialize hiding (getInt64le)
 import qualified Data.Vector as V
 import qualified Data.Vector.Generic.Mutable as VGM
-import qualified Network.Socket.ByteString as SB
+import Database.Franz.Internal
+import Database.Franz.Protocol
 import qualified Network.Socket as S
+import qualified Network.Socket.ByteString as SB
 
 -- The protocol
 --
@@ -59,10 +61,21 @@ import qualified Network.Socket as S
 --   | ----  RawClean j ---->   |
 --   | ----  RawClean k ---->   |
 
+newtype ConnStateMap v = ConnStateMap (IM.IntMap v)
+
+instance ResourceMap ConnStateMap where
+  type Key ConnStateMap = Int
+  empty = ConnStateMap IM.empty
+  delete k (ConnStateMap m) = ConnStateMap (IM.delete k m)
+  insert k v (ConnStateMap m) = ConnStateMap (IM.insert k v m)
+  lookup k (ConnStateMap m) = IM.lookup k m
+
 data Connection = Connection
   { connSocket :: MVar S.Socket
-  , connReqId :: TVar Int
-  , connStates :: TVar (IM.IntMap (ResponseStatus Contents))
+  , connReqId :: !Counter
+  , connStates :: !(ConcurrentResourceMap
+                     ConnStateMap
+                     (TVar (ResponseStatus Contents)))
   , connThread :: !ThreadId
   }
 
@@ -70,6 +83,8 @@ data ResponseStatus a = WaitingInstant
     | WaitingDelayed
     | Errored !FranzException
     | Available !a
+    -- | The user cancelled the request.
+    | RequestFinished
     deriving (Show, Functor)
 
 withConnection :: String -> S.PortNumber -> B.ByteString -> (Connection -> IO r) -> IO r
@@ -89,38 +104,38 @@ connect host port dir = do
     e -> throwIO $ ClientError $ "Database.Franz.Network.connect: Unexpected response: " ++ show e
 
   connSocket <- newMVar sock
-  connReqId <- newTVarIO 0
-  connStates <- newTVarIO IM.empty
+  connReqId <- newCounter 0
+  connStates <- newResourceMap
   buf <- newIORef B.empty
-  connThread <- flip forkFinally (either throwIO pure) $ forever
-    $ (>>=either (throwIO . ClientError) atomically) $ runGetRecv buf sock $ get >>= \case
-      ResponseInstant i -> do
-        resp <- getResponse
-        return $ do
-          m <- readTVar connStates
-          case IM.lookup i m of
-            Nothing -> pure ()
-            Just WaitingInstant -> writeTVar connStates $! IM.insert i (Available resp) m
-            e -> throwSTM $ ClientError $ "Unexpected state on ResponseInstant " ++ show i ++ ": " ++ show e
-      ResponseWait i -> return $ do
-        m <- readTVar connStates
-        case IM.lookup i m of
-          Nothing -> pure ()
-          Just WaitingInstant -> writeTVar connStates $! IM.insert i WaitingDelayed m
-          e -> throwSTM $ ClientError $ "Unexpected state on ResponseWait " ++ show i ++ ": " ++ show e
-      ResponseDelayed i -> do
-        resp <- getResponse
-        return $ do
-          m <- readTVar connStates
-          case IM.lookup i m of
-            Nothing -> pure ()
-            Just WaitingDelayed -> writeTVar connStates $! IM.insert i (Available resp) m
-            e -> throwSTM $ ClientError $ "Unexpected state on ResponseDelayed " ++ show i ++ ": " ++ show e
-      ResponseError i e -> return $ do
-        m <- readTVar connStates
-        case IM.lookup i m of
-          Nothing -> throwSTM e
-          Just _ -> writeTVar connStates $! IM.insert i (Errored e) m
+  let -- Get a reference to shared state for the request if it exists.
+      withRequest i f = withInitialisedResource connStates i (\_ -> pure ()) $ \case
+        Nothing ->
+          -- If it throws an exception on no value, great, it will
+          -- float out here. If it returns a value, it'll just be
+          -- ignore as we can't do anything with it anyway.
+          void $ atomically (f Nothing)
+        Just reqVar -> atomically $ readTVar reqVar >>= \case
+          -- If request is finished, do nothing to the content.
+          RequestFinished -> void $ f Nothing
+          s -> f (Just s) >>= mapM_ (writeTVar reqVar)
+
+      runGetThrow :: Get a -> IO a
+      runGetThrow g = runGetRecv buf sock g
+        >>= either (throwIO . ClientError) pure
+
+  connThread <- flip forkFinally (either throwIO pure) $ forever $ runGetThrow get >>= \case
+    Response i -> do
+      resp <- runGetThrow getResponse
+      withRequest i . traverse $ \case
+        WaitingInstant -> pure (Available resp)
+        WaitingDelayed -> pure (Available resp)
+        e -> throwSTM $ ClientError $ "Unexpected state on ResponseInstant " ++ show i ++ ": " ++ show e
+    ResponseWait i -> withRequest i . traverse $ \case
+      WaitingInstant -> pure WaitingDelayed
+      e -> throwSTM $ ClientError $ "Unexpected state on ResponseWait " ++ show i ++ ": " ++ show e
+    ResponseError i e -> withRequest i $ \case
+      Nothing -> throwSTM e
+      Just{} -> pure $ Just (Errored e)
   return Connection{..}
 
 disconnect :: Connection -> IO ()
@@ -171,61 +186,64 @@ getResponse = do
                 return vres
 
 -- | Fetch requested data from the server.
--- Termination of the continuation cancels the request, allowing flexible
--- control of its lifetime.
-fetch :: Connection
+--
+-- Termination of 'fetch' continuation cancels the request, allowing
+-- flexible control of its lifetime.
+fetch
+  :: Connection
   -> Query
-  -> (STM Response -> IO r) -- ^ running the STM action blocks until the response arrives
+  -> (STM Response -> IO r)
+  -- ^ Wait for the response in a blocking manner. You should only run
+  -- the continuation inside a 'fetch' block: leaking the STM action
+  -- and running it outside will result in a 'ClientError' exception.
   -> IO r
 fetch Connection{..} req cont = do
-  reqId <- atomically $ do
-    i <- readTVar connReqId
-    writeTVar connReqId $! i + 1
-    modifyTVar' connStates $ IM.insert i WaitingInstant
-    return i
-  withMVar connSocket $ \sock -> SB.sendAll sock $ encode $ RawRequest reqId req
-  let
-    go = do
-      m <- readTVar connStates
-      case IM.lookup reqId m of
-        Nothing -> return $ Left V.empty -- fetch ended; nothing to return
-        Just WaitingInstant -> retry -- wait for an instant response
-        Just (Available xs) -> do
-          writeTVar connStates $! IM.delete reqId m
-          return $ Left xs
-        Just WaitingDelayed -> return $ Right $ do
-          m' <- readTVar connStates
-          case IM.lookup reqId m' of
-            Nothing -> return V.empty -- fetch ended; nothing to return
-            Just WaitingDelayed -> retry
-            Just (Available xs) -> do
-              writeTVar connStates $! IM.delete reqId m'
-              return xs
-            Just (Errored e) -> throwSTM e
-            Just WaitingInstant -> throwSTM $ ClientError $ "fetch/WaitingDelayed: unexpected state WaitingInstant"
-        Just (Errored e) -> throwSTM e
-  cont go `finally` do
-    join $ atomically $ do
-      m <- readTVar connStates
-      writeTVar connStates $! IM.delete reqId m
-      -- If the response arrived, no need to send a clean request
-      return $ when (IM.member reqId m)
-        $ withMVar connSocket $ \sock -> SB.sendAll sock $ encode $ RawClean reqId
+  reqId <- atomicAddCounter connReqId 1
 
+  let -- When we exit the scope of the request, ensure that we cancel any
+      -- outstanding request and set the appropriate state, lest the user
+      -- leaks the resource and tries to re-run the provided action.
+      cleanupRequest reqVar = do
+        let inFlight WaitingInstant = True
+            inFlight WaitingDelayed = True
+            inFlight _ = False
+        -- Check set the internal state to RequestFinished while
+        -- noting if there's possibly a request still in flight.
+        requestInFlight <- atomically $
+          stateTVar reqVar $ inFlight &&& const RequestFinished
+        when requestInFlight $ withMVar connSocket $ \sock ->
+          SB.sendAll sock $ encode $ RawClean reqId
 
--- | Queries in traversable @t@ form an atomic request. The response will become
--- available once all the elements are available.
---
--- Generalisation to Traversable guarantees that the response preserves the
--- shape of the request.
-fetchTraverse :: Traversable t => Connection -> t Query -> (STM (Either (t Contents) (STM (t Contents))) -> IO r) -> IO r
-fetchTraverse conn reqs = runContT $ do
-  tresps <- traverse (ContT . fetch conn) reqs
-  return $ do
-    resps <- sequence tresps
-    case traverse (either Just (const Nothing)) resps of
-      Just instant -> return $ Left instant
-      Nothing -> return $ Right $ traverse (either pure id) resps
+  -- We use a shared resource map here to ensure that we only hold
+  -- onto the share connection state TVar for the duration of making a
+  -- fetch request. If anything goes wrong in the middle, we're
+  -- certain it'll get removed.
+  withSharedResource connStates reqId
+    (newTVarIO WaitingInstant)
+    cleanupRequest $ \reqVar -> do
+    -- Send the user request.
+    withMVar connSocket $ \sock -> SB.sendAll sock $ encode
+      $ RawRequest reqId req
+
+    let
+      requestFinished = ClientError "request already finished"
+
+      getDelayed = readTVar reqVar >>= \case
+        RequestFinished -> throwSTM requestFinished
+        WaitingDelayed -> retry
+        Available xs -> return xs
+        Errored e -> throwSTM e
+        WaitingInstant -> throwSTM $ ClientError $
+          "fetch/WaitingDelayed: unexpected state WaitingInstant"
+
+    -- Run the user's continuation. 'withSharedResource' takes care of
+    -- any clean-up necessary.
+    cont $ readTVar reqVar >>= \case
+      RequestFinished -> throwSTM requestFinished
+      Errored e -> throwSTM e
+      WaitingInstant -> retry -- wait for an instant response
+      Available xs -> pure $ Left xs
+      WaitingDelayed -> pure $ Right getDelayed
 
 -- | Send a single query and wait for the result. If it timeouts, it returns an empty list.
 fetchSimple :: Connection
