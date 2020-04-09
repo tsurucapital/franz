@@ -35,7 +35,7 @@ library
     , bytestring
     , cereal
     , containers
-    , concurrent-resource-map >=0.2 && <0.3
+    , concurrent-resource-map ^>=0.2
     , cpu
     , deepseq
     , directory
