@@ -159,7 +159,7 @@ startServer Settings{..} = withFranzReader $ \franzReader -> do
             Nothing -> respondLoop livePrefix path
             -- Mount a squashfs image and increment the counter
             Just prefix | src <- prefix </> path -> do
-              -- ^ check if an archive exists
+              -- check if an archive exists
               exist <- doesFileExist src
               if exist
                 then withSharedResource vMounts path
