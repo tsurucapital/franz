@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "franz.fullname" . }}
+  labels:
+    {{- include "franz.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.portName }}
+      protocol: TCP
+      name: {{ .Values.service.portName }}
+  selector:
+    {{- include "franz.selectorLabels" . | nindent 4 }}
