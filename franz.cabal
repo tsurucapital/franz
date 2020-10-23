@@ -1,5 +1,5 @@
 cabal-version:  2.0
-version:        0.3
+version:        0.3.0.1
 name:           franz
 description:    Please see the README on GitHub at <https://github.com/fumieval/franz#readme>
 homepage:       https://github.com/fumieval/franz#readme
@@ -28,6 +28,7 @@ library
       Database.Franz.Server
       Database.Franz.Network
       Database.Franz.Protocol
+      Database.Franz.URI
   hs-source-dirs:
       src
   build-depends:
@@ -49,6 +50,7 @@ library
     , sendfile
     , stm
     , stm-delay
+    , text
     , transformers
     , unboxed-ref
     , vector
