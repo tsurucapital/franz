@@ -28,6 +28,7 @@ library
       Database.Franz.Server
       Database.Franz.Network
       Database.Franz.Protocol
+      Database.Franz.Reconnect
       Database.Franz.URI
   hs-source-dirs:
       src
@@ -40,6 +41,7 @@ library
     , cpu
     , deepseq
     , directory
+    , exceptions
     , fast-builder ^>= 0.1.2.0
     , filepath
     , fsnotify
