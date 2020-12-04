@@ -1,6 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 module Main where
 import Database.Franz
+import Database.Franz.URI
 import Database.Franz.Network
 
 import Control.Monad
@@ -17,10 +18,10 @@ import System.IO
 import System.Console.GetOpt
 import System.Exit
 
-parseHostPort :: String -> (String -> PortNumber -> r) -> r
+parseHostPort :: String -> (FranzPath -> r) -> B.ByteString -> r
 parseHostPort str k = case break (==':') str of
-  (host, ':' : port) -> k host (read port)
-  (host, _) -> k host defaultPort
+  (host, ':' : port) -> \path -> k (host, read port, path)
+  (host, _) -> \path -> k (host, defaultPort, path)
 
 data Options = Options
   { host :: String

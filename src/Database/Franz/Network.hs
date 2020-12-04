@@ -40,6 +40,7 @@ import qualified Data.Vector as V
 import qualified Data.Vector.Generic.Mutable as VGM
 import Database.Franz.Internal
 import Database.Franz.Protocol
+import Database.Franz.URI
 import qualified Network.Socket as S
 import qualified Network.Socket.ByteString as SB
 
@@ -87,11 +88,11 @@ data ResponseStatus a = WaitingInstant
     | RequestFinished
     deriving (Show, Functor)
 
-withConnection :: String -> S.PortNumber -> B.ByteString -> (Connection -> IO r) -> IO r
-withConnection host port dir = bracket (connect host port dir) disconnect
+withConnection :: FranzPath -> (Connection -> IO r) -> IO r
+withConnection path = bracket (connect path) disconnect
 
-connect :: String -> S.PortNumber -> B.ByteString -> IO Connection
-connect host port dir = do
+connect :: FranzPath -> IO Connection
+connect (host, port, dir) = do
   let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
   addr:_ <- S.getAddrInfo (Just hints) (Just host) (Just $ show port)
   sock <- S.socket (S.addrFamily addr) S.Stream (S.addrProtocol addr)

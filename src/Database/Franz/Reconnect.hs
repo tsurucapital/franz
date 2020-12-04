@@ -35,7 +35,6 @@ withReconnection Pool{..} cont = recovering
   [const $ Handler $ \Reconnect -> pure True]
   body
   where
-    (host, port, prefix) = poolPath
 
     handler ex
       | Just (ClientError err) <- fromException ex = Just err
@@ -51,7 +50,7 @@ withReconnection Pool{..} cont = recovering
                 [ "Connnecting to"
                 , fromFranzPath poolPath
                 ]
-            conn <- tryJust handler (connect host port prefix)
+            conn <- tryJust handler (connect poolPath)
                 >>= either (\e -> poolLogFunc e >> throwM Reconnect) pure
             poolLogFunc $ "Connection #" <> show i <> " established"
             pure ((i, Just conn), (i, conn))
