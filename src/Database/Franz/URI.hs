@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Database.Franz.URI
-  ( FranzPath
+  ( FranzPath(..)
   , toFranzPath
   , fromFranzPath
   ) where
@@ -8,13 +8,19 @@ module Database.Franz.URI
 import qualified Data.ByteString as B
 import Data.List (stripPrefix)
 import Data.String
-import Network.Socket (PortNumber)
+import Network.Socket (HostName, PortNumber)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Text.Read (readMaybe)
 
-type FranzPath = (String, PortNumber, B.ByteString)
+data FranzPath = FranzPath
+  { franzHost :: !HostName
+  , franzPort :: !PortNumber
+  , franzPrefix :: !B.ByteString
+  -- ^ Prefix of franz directories
+  }
 
+-- | Parse a franz URI (franz://host:port/path).
 toFranzPath :: String -> Either String FranzPath
 toFranzPath uri = do
   hostnamePath <- maybe (Left "Expecting franz://") Right $ stripPrefix "franz://" uri
@@ -24,12 +30,13 @@ toFranzPath uri = do
   let path' = T.encodeUtf8 $ T.pack path
   case break (== ':') host of
     (hostname, ':' : portStr)
-        | Just p <- readMaybe portStr -> Right (hostname, p, path')
+        | Just p <- readMaybe portStr -> Right $ FranzPath hostname p path'
         | otherwise -> Left "Failed to parse the port number"
-    _ -> Right (host, 1886, path')
+    _ -> Right $ FranzPath host 1886 path'
 
+-- | Render 'FranzPath' as a franz URI.
 fromFranzPath :: (Monoid a, IsString a) => FranzPath -> a
-fromFranzPath (host, port, path) = mconcat
+fromFranzPath (FranzPath host port path) = mconcat
   [ "franz://"
   , fromString host
   , ":"

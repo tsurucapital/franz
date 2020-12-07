@@ -92,7 +92,7 @@ withConnection :: FranzPath -> (Connection -> IO r) -> IO r
 withConnection path = bracket (connect path) disconnect
 
 connect :: FranzPath -> IO Connection
-connect (host, port, dir) = do
+connect (FranzPath host port dir) = do
   let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
   addr:_ <- S.getAddrInfo (Just hints) (Just host) (Just $ show port)
   sock <- S.socket (S.addrFamily addr) S.Stream (S.addrProtocol addr)
