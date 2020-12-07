@@ -1,4 +1,3 @@
-{-# LANGUAGE LambdaCase, RecordWildCards #-}
 module Main where
 
 import Database.Franz.Server

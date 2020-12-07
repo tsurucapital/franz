@@ -234,7 +234,7 @@ fetch Connection{..} req cont = do
         WaitingDelayed -> retry
         Available xs -> return xs
         Errored e -> throwSTM e
-        WaitingInstant -> throwSTM $ ClientError $
+        WaitingInstant -> throwSTM $ ClientError
           "fetch/WaitingDelayed: unexpected state WaitingInstant"
 
     -- Run the user's continuation. 'withSharedResource' takes care of

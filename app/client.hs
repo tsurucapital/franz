@@ -20,8 +20,8 @@ import System.Exit
 
 parseHostPort :: String -> (FranzPath -> r) -> B.ByteString -> r
 parseHostPort str k = case break (==':') str of
-  (host, ':' : port) -> \path -> k $ FranzPath host (read port) path
-  (host, _) -> \path -> k $ FranzPath host defaultPort path
+  (host, ':' : port) -> k . FranzPath host (read port)
+  (host, _) -> k . FranzPath host defaultPort
 
 data Options = Options
   { host :: String

@@ -1,8 +1,6 @@
 {-# LANGUAGE DeriveGeneric, LambdaCase, OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TypeFamilies #-}
 module Database.Franz.Server
   ( Settings(..)
@@ -50,7 +48,7 @@ respond prefix env refThreads path buf vConn = do
               Left ex | Just e <- fromException ex -> sendHeader $ ResponseError reqId e
               _ -> pure ()
             `finally` popThread reqId
-      handleQuery prefix env path req $ \stream query -> do
+      handleQuery prefix env path req $ \stream query ->
         atomically (fmap Right query `catchSTM` (pure . Left)) >>= \case
           Left e -> sendHeader $ ResponseError reqId e
           Right (ready, offsets)

@@ -1,4 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE BangPatterns #-}
@@ -95,7 +94,7 @@ createStream man path = do
 
   -- TODO broadcast an exception if it exits?
   followThread <- flip forkFinally final $ do
-    forM_ (IM.maxViewWithKey initialOffsets) $ \((i, _), _) -> do
+    forM_ (IM.maxViewWithKey initialOffsets) $ \((i, _), _) ->
       hSeek indexHandle AbsoluteSeek $ fromIntegral $ succ i * icount * 8
     forever $ do
       bs <- B.hGet indexHandle (8 * icount)
@@ -208,7 +207,7 @@ reaper int life FranzReader{..} = forever $ do
   -- to the user: this is in contrast to doing linear-time traversals
   -- just to get counts of things we've already traversed.
   stats <- flip execStateT (ReaperState 0 0) $
-    forM_ (HM.toList allStreams) $ \(mPath, streams) -> do
+    forM_ (HM.toList allStreams) $ \(mPath, streams) ->
       forM_ (HM.toList streams) $ \(sPath, stream) -> do
         modify' $ \s -> s { totalStreams = totalStreams s + 1 }
         snapAct <- lift $ readTVarIO (vActivity stream)
