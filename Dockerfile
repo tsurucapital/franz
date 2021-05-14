@@ -1,6 +1,6 @@
 # syntax = docker/dockerfile:experimental
 
-FROM fumieval/ubuntu-ghc:18.04-8.8.2 as builder
+FROM ubuntu-ghc:20.04-8.10.3 as builder
 
 WORKDIR /build
 
@@ -10,7 +10,7 @@ ENV CABAL_CONFIG /build/cabal.config
 RUN cabal update
 
 RUN cabal install cabal-plan \
-  --constraint='cabal-plan ^>=0.6' \
+  --constraint='cabal-plan ^>=0.7' \
   --constraint='cabal-plan +exe' \
   --installdir=/usr/local/bin
 
@@ -22,7 +22,7 @@ COPY . /build
 RUN --mount=type=cache,target=dist-newstyle cabal build exe:franzd \
   && mkdir -p /build/artifacts && cp $(cabal-plan list-bin franzd) /build/artifacts/
 
-RUN upx /build/artifacts/franzd; done
+RUN upx /build/artifacts/franzd
 
 FROM ubuntu:18.04
 
