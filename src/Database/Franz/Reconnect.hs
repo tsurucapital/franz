@@ -10,6 +10,7 @@ module Database.Franz.Reconnect
   , withReconnection
   , Reconnect(..)
   , atomicallyReconnecting
+  , fetchWithPool
   )
   where
 
@@ -27,6 +28,14 @@ data Pool = Pool
   , poolRetryPolicy :: RetryPolicyM IO
   , poolLogFunc :: String -> IO ()
   }
+
+-- | A wrapper of 'fetch' which calls 'withReconnection' internally
+fetchWithPool
+  :: Pool
+  -> Query
+  -> (STM Response -> IO r)
+  -> IO r
+fetchWithPool pool q cont = withReconnection pool $ \conn -> fetch conn q cont
 
 -- | Run an action which takes a 'Connection', reconnecting whenever it throws an exception.
 withReconnection :: Pool -> (Connection -> IO a) -> IO a
