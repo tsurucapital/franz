@@ -22,14 +22,16 @@ import GHC.Clock (getMonotonicTime)
 import System.Directory
 import System.FilePath
 import System.IO
-import System.FSNotify
+import qualified System.FSNotify as FS
+
+data StreamStatus = CaughtUp | Outdated | Gone deriving Eq
 
 data Stream = Stream
   { vOffsets :: !(TVar (IM.IntMap Int))
   , indexNames :: ![B.ByteString]
   , indices :: !(HM.HashMap B.ByteString (TVar (IM.IntMap Int)))
   , vCount :: !(TVar Int)
-  , vCaughtUp :: !(TVar Bool)
+  , vStatus :: !(TVar StreamStatus)
   , followThread :: !ThreadId
   , indexHandle :: !Handle
   , payloadHandle :: !Handle
@@ -58,7 +60,7 @@ closeStream Stream{..} = do
   hClose payloadHandle
   hClose indexHandle
 
-createStream :: WatchManager -> FilePath -> IO Stream
+createStream :: FS.WatchManager -> FilePath -> IO Stream
 createStream man path = do
   let offsetPath = path </> "offsets"
   let payloadPath = path </> "payloads"
@@ -75,12 +77,16 @@ createStream man path = do
   let initialOffsets = IM.fromList $ V.toList
         $ V.zip (V.enumFromN 0 count) $ V.map U.head initialIndices
   vOffsets <- newTVarIO $! initialOffsets
-  vCaughtUp <- newTVarIO False
+  vStatus <- newTVarIO Outdated
   vCount <- newTVarIO $! IM.size initialOffsets
-  _ <- watchDir man path (\case
-    Modified p _ _ | p == offsetPath -> True
+  _ <- FS.watchDir man path (\case
+    FS.Modified p _ _ | p == offsetPath -> True
+    FS.Removed p _ _ | p == offsetPath -> True
     _ -> False)
-    $ const $ atomically $ writeTVar vCaughtUp False
+    $ \case
+      FS.Modified _ _ _ -> atomically $ writeTVar vStatus Outdated
+      FS.Removed _ _ _ -> atomically $ writeTVar vStatus Gone
+      _ -> pure ()
 
   vIndices <- forM [1..length indexNames] $ \i -> newTVarIO
     $ IM.fromList $ V.toList $ V.zip (V.map (U.! i) initialIndices) (V.enumFromN 0 count)
@@ -100,8 +106,11 @@ createStream man path = do
       bs <- B.hGet indexHandle (8 * icount)
       if B.null bs
         then do
-          atomically $ writeTVar vCaughtUp True
-          atomically $ readTVar vCaughtUp >>= check . not
+          atomically $ modifyTVar' vStatus $ \case
+            Outdated -> CaughtUp
+            CaughtUp -> CaughtUp
+            Gone -> Gone
+          atomically $ readTVar vStatus >>= check . (==Outdated)
         else do
           ofs : indices <- either (throwIO . InternalError) pure $ runGet (replicateM icount getI) bs
           atomically $ do
@@ -143,7 +152,7 @@ splitR :: Int -> IM.IntMap a -> (IM.IntMap a, IM.IntMap a)
 splitR i m = let (l, p, r) = IM.splitLookup i m in (l, maybe id (IM.insert i) p r)
 
 data FranzReader = FranzReader
-  { watchManager :: WatchManager
+  { watchManager :: FS.WatchManager
   , vStreams :: TVar (HM.HashMap FilePath (HM.HashMap B.ByteString Stream))
   }
 
@@ -232,7 +241,7 @@ reaper int life FranzReader{..} = forever $ do
 withFranzReader :: (FranzReader -> IO ()) -> IO ()
 withFranzReader k = do
   vStreams <- newTVarIO HM.empty
-  withManager $ \watchManager -> k FranzReader{..}
+  FS.withManager $ \watchManager -> k FranzReader{..}
 
 handleQuery :: FilePath -- ^ prefix
   -> FranzReader
@@ -242,7 +251,10 @@ handleQuery :: FilePath -- ^ prefix
 handleQuery prefix FranzReader{..} dir (Query name begin_ end_ rt) cont
   = bracket acquire removeActivity
   $ \stream@Stream{..} -> cont stream $ do
-    readTVar vCaughtUp >>= check
+    readTVar vStatus >>= \case
+        Outdated -> retry
+        CaughtUp -> pure ()
+        Gone -> throwSTM $ StreamNotFound path
     allOffsets <- readTVar vOffsets
     let finalOffset = case IM.maxViewWithKey allOffsets of
           Just ((k, _), _) -> k + 1
@@ -269,9 +281,9 @@ handleQuery prefix FranzReader{..} dir (Query name begin_ end_ rt) cont
           return $! maybe minBound fst $ IM.maxView body'
     return $! range begin end rt allOffsets
   where
+    path = prefix </> dir </> B.unpack name
     acquire = join $ atomically $ do
       allStreams <- readTVar vStreams
-      let !path = prefix </> dir </> B.unpack name
       let !streams = maybe mempty id $ HM.lookup dir allStreams
       case HM.lookup name streams of
         Nothing -> pure $ bracketOnError
