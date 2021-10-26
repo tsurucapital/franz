@@ -1,8 +1,11 @@
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GeneralisedNewtypeDeriving #-}
 module Database.Franz.Protocol
   ( apiVersion
   , defaultPort
   , IndexName
+  , StreamName(..)
   , FranzException(..)
   , RequestType(..)
   , ItemRef(..)
@@ -16,8 +19,11 @@ import Control.Exception (Exception)
 import qualified Data.ByteString.Char8 as B
 import Data.Serialize hiding (getInt64le)
 import Database.Franz.Internal (getInt64le)
+import Data.Hashable (Hashable)
+import Data.String
 import Network.Socket (PortNumber)
 import GHC.Generics (Generic)
+import qualified Data.ByteString.FastBuilder as BB
 
 apiVersion :: B.ByteString
 apiVersion = B.pack "0"
@@ -26,6 +32,13 @@ defaultPort :: PortNumber
 defaultPort = 1886
 
 type IndexName = B.ByteString
+
+newtype StreamName = StreamName { unStreamName :: B.ByteString }
+  deriving newtype (Show, Eq, Ord, Hashable, Serialize)
+
+-- | UTF-8 encoded
+instance IsString StreamName where
+  fromString = StreamName . BB.toStrictByteString . BB.stringUtf8
 
 data FranzException = MalformedRequest !String
   | StreamNotFound !FilePath
@@ -45,7 +58,7 @@ data ItemRef = BySeqNum !Int -- ^ sequential number
 instance Serialize ItemRef
 
 data Query = Query
-  { reqStream :: !B.ByteString
+  { reqStream :: !StreamName
   , reqFrom :: !ItemRef -- ^ name of the index to search
   , reqTo :: !ItemRef -- ^ name of the index to search
   , reqType :: !RequestType

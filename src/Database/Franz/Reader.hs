@@ -1,6 +1,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE GeneralisedNewtypeDeriving #-}
 module Database.Franz.Reader where
 
 import Control.Concurrent
@@ -9,6 +10,7 @@ import Control.Exception
 import Control.Monad
 import Control.Monad.State.Strict
 import Control.Monad.Trans.Maybe
+import Data.Hashable (Hashable)
 import Data.Serialize
 import Database.Franz.Protocol
 import qualified Data.ByteString.Char8 as B
@@ -16,6 +18,8 @@ import qualified Data.HashMap.Strict as HM
 import qualified Data.IntMap.Strict as IM
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector as V
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 import Data.Void
 import Data.Maybe (isJust)
 import GHC.Clock (getMonotonicTime)
@@ -27,9 +31,10 @@ import qualified System.FSNotify as FS
 data StreamStatus = CaughtUp | Outdated | Gone deriving Eq
 
 data Stream = Stream
-  { vOffsets :: !(TVar (IM.IntMap Int))
-  , indexNames :: ![B.ByteString]
-  , indices :: !(HM.HashMap B.ByteString (TVar (IM.IntMap Int)))
+  { streamPath :: FilePath
+  , vOffsets :: !(TVar (IM.IntMap Int))
+  , indexNames :: ![IndexName]
+  , indices :: !(HM.HashMap IndexName (TVar (IM.IntMap Int)))
   , vCount :: !(TVar Int)
   , vStatus :: !(TVar StreamStatus)
   , followThread :: !ThreadId
@@ -122,7 +127,7 @@ createStream man path = do
   let indices = HM.fromList $ zip indexNames vIndices
 
   vActivity <- getMonotonicTime >>= newTVarIO . Left
-  return Stream{..}
+  return Stream{ streamPath = path, ..}
   where
     logFollower = hPutStrLn stderr . unwords . (:) "[follower]"
 
@@ -153,7 +158,7 @@ splitR i m = let (l, p, r) = IM.splitLookup i m in (l, maybe id (IM.insert i) p 
 
 data FranzReader = FranzReader
   { watchManager :: FS.WatchManager
-  , vStreams :: TVar (HM.HashMap FilePath (HM.HashMap B.ByteString Stream))
+  , vStreams :: TVar (HM.HashMap FranzDirectory (HM.HashMap StreamName Stream))
   }
 
 data ReaperState = ReaperState
@@ -174,7 +179,7 @@ reaper int life FranzReader{..} = forever $ do
 
       -- Try prunning stream at given filepath. Checks if stream
       -- should really be pruned first.
-      tryPrune :: FilePath -> B.ByteString -> STM (Maybe Stream)
+      tryPrune :: FranzDirectory -> StreamName -> STM (Maybe Stream)
       tryPrune mPath sPath = runMaybeT $ do
         currentAllStreams <- lift $ readTVar vStreams
         currentStreams <- MaybeT . pure $ HM.lookup mPath currentAllStreams
@@ -243,9 +248,28 @@ withFranzReader k = do
   vStreams <- newTVarIO HM.empty
   FS.withManager $ \watchManager -> k FranzReader{..}
 
-handleQuery :: FilePath -- ^ prefix
+-- | Globally-configured path which contains franz directories.
+newtype FranzPrefix = FranzPrefix { unFranzPrefix :: FilePath } deriving (Eq, Hashable)
+
+-- | Directory which contains franz streams.
+-- Values of this type serve two purposes:
+--
+-- * Arbitrary prefix so that clients don't have to specify the full path 
+newtype FranzDirectory = FranzDirectory FilePath deriving (Eq, Hashable)
+
+getFranzDirectory :: FranzPrefix -> FranzDirectory -> FilePath
+getFranzDirectory (FranzPrefix prefix) (FranzDirectory dir) = prefix </> dir
+
+getFranzStreamPath :: FranzPrefix -> FranzDirectory -> StreamName -> FilePath
+getFranzStreamPath prefix dir name
+  = getFranzDirectory prefix dir </> streamPathFragment name
+
+streamPathFragment :: StreamName -> FilePath
+streamPathFragment = T.unpack . T.decodeUtf8 . unStreamName
+
+handleQuery :: FranzPrefix
   -> FranzReader
-  -> FilePath -- ^ directory
+  -> FranzDirectory
   -> Query
   -> (Stream -> STM (Bool, QueryResult) -> IO r) -> IO r
 handleQuery prefix FranzReader{..} dir (Query name begin_ end_ rt) cont
@@ -254,7 +278,7 @@ handleQuery prefix FranzReader{..} dir (Query name begin_ end_ rt) cont
     readTVar vStatus >>= \case
         Outdated -> retry
         CaughtUp -> pure ()
-        Gone -> throwSTM $ StreamNotFound path
+        Gone -> throwSTM $ StreamNotFound streamPath
     allOffsets <- readTVar vOffsets
     let finalOffset = case IM.maxViewWithKey allOffsets of
           Just ((k, _), _) -> k + 1
@@ -281,13 +305,12 @@ handleQuery prefix FranzReader{..} dir (Query name begin_ end_ rt) cont
           return $! maybe minBound fst $ IM.maxView body'
     return $! range begin end rt allOffsets
   where
-    path = prefix </> dir </> B.unpack name
     acquire = join $ atomically $ do
       allStreams <- readTVar vStreams
       let !streams = maybe mempty id $ HM.lookup dir allStreams
       case HM.lookup name streams of
         Nothing -> pure $ bracketOnError
-          (createStream watchManager path)
+          (createStream watchManager $ getFranzStreamPath prefix dir name)
           closeStream $ \s -> atomically $ do
             addActivity s
             modifyTVar' vStreams $ HM.insert dir $ HM.insert name s streams

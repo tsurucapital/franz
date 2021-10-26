@@ -45,6 +45,7 @@ library
     , fast-builder ^>= 0.1.2.0
     , filepath
     , fsnotify
+    , hashable
     , mtl
     , network
     , process

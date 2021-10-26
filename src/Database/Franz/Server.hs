@@ -29,14 +29,13 @@ import qualified Network.Socket.SendFile.Handle as SF
 import qualified Network.Socket.ByteString as SB
 import qualified Network.Socket as S
 import System.Directory
-import System.FilePath
 import System.IO
 import System.Process (ProcessHandle, spawnProcess, cleanupProcess,
   waitForProcess, getProcessExitCode, getPid)
 
 data Env = Env
-  { prefix :: FilePath
-  , path :: FilePath
+  { prefix :: FranzPrefix
+  , path :: FranzDirectory
   , franzReader :: FranzReader
   , refThreads :: IORef (IM.IntMap ThreadId) -- ^ thread pool of pending requests
   , recvBuffer :: IORef B.ByteString -- ^ received but unconsumed bytes
@@ -105,9 +104,9 @@ data Settings = Settings
   { reapInterval :: Double
   , streamLifetime :: Double
   , port :: S.PortNumber
-  , livePrefix :: FilePath
-  , archivePrefix :: Maybe FilePath
-  , mountPrefix :: FilePath
+  , livePrefix :: FranzPrefix
+  , archivePrefix :: Maybe FranzPrefix
+  , mountPrefix :: FranzPrefix
   }
 
 newtype MountMap v = MountMap (HM.HashMap FilePath v)
@@ -129,7 +128,7 @@ startServer Settings{..} = evalContT $ do
   franzReader <- ContT withFranzReader
 
   liftIO $ do
-    forM_ archivePrefix $ \path -> do
+    forM_ archivePrefix $ \(FranzPrefix path) -> do
       e <- doesDirectoryExist path
       unless e $ error $ "archive prefix " ++ path ++ " doesn't exist"
 
@@ -168,9 +167,9 @@ accept Settings{..} vMounts franzReader conn connAddr = do
   -- buffer of received octets
   recvBuffer <- newIORef B.empty
 
-  let respondLoop prefix path = do
+  let respondLoop prefix path@(FranzDirectory dir) = do
         SB.sendAll conn apiVersion
-        logServer [show connAddr, show path]
+        logServer [show connAddr, show dir]
         refThreads <- newIORef IM.empty
         vConn <- newMVar conn
         forever (respond Env{..}) `finally` do
@@ -178,7 +177,7 @@ accept Settings{..} vMounts franzReader conn connAddr = do
 
   path <- liftIO $ runGetRecv recvBuffer conn get >>= \case
     Left _ -> throwIO $ MalformedRequest "Expecting a path"
-    Right pathBS -> pure $ B.unpack pathBS
+    Right pathBS -> pure $ FranzDirectory $ B.unpack pathBS
 
   -- when the final reader exits, close all the streams associated to the path
   let closeGroup = do
@@ -192,11 +191,11 @@ accept Settings{..} vMounts franzReader conn connAddr = do
     -- just start a session without thinking about archives
     Nothing -> respondLoop livePrefix path
     -- Mount a squashfs image and increment the counter
-    Just prefix | src <- prefix </> path -> do
+    Just prefix | src <- getFranzDirectory prefix path -> do
       -- check if an archive exists
       exist <- doesFileExist src
       if exist
-        then withFuse vMounts closeGroup src (mountPrefix </> path) $ respondLoop mountPrefix path
+        then withFuse vMounts closeGroup src (getFranzDirectory mountPrefix path) $ respondLoop mountPrefix path
         else do
           logServer ["Archive", src, "doesn't exist; falling back to live streams"]
           respondLoop livePrefix path

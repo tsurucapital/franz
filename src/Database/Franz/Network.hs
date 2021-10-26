@@ -144,7 +144,7 @@ disconnect Connection{..} = do
   killThread connThread
   withMVar connSocket S.close
 
-defQuery :: B.ByteString -> Query
+defQuery :: StreamName -> Query
 defQuery name = Query
   { reqStream = name
   , reqFrom = BySeqNum 0
