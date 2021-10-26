@@ -1,6 +1,6 @@
-# Changelog for franz
+# v0.4
 
-## Unreleased changes
-
+* Added `StreamName`
+    * `reqStream` now has a type `StreamName`
 * Added `Database.Franz.Reconnect`
 * Added `Database.Franz.URI`
