@@ -11,6 +11,8 @@ module Database.Franz.Server
 import Control.Concurrent
 import Control.Exception
 import Control.Monad
+import Control.Monad.IO.Class
+import Control.Monad.Trans.Cont
 import Control.Retry
 import Control.Concurrent.STM
 import Database.Franz.Internal
@@ -117,77 +119,98 @@ newMountMap = newResourceMap
 startServer
     :: Settings
     -> IO ()
-startServer Settings{..} = withFranzReader $ \franzReader -> do
+startServer Settings{..} = evalContT $ do
+  franzReader <- ContT withFranzReader
 
-  forM_ archivePrefix $ \path -> do
-    e <- doesDirectoryExist path
-    unless e $ error $ "archive prefix " ++ path ++ " doesn't exist"
+  liftIO $ do
+    forM_ archivePrefix $ \path -> do
+      e <- doesDirectoryExist path
+      unless e $ error $ "archive prefix " ++ path ++ " doesn't exist"
 
-  hSetBuffering stderr LineBuffering
-  _ <- forkIO $ reaper reapInterval streamLifetime franzReader
+    _ <- liftIO $ forkIO $ reaper reapInterval streamLifetime franzReader
+    hSetBuffering stderr LineBuffering
 
-  vMounts <- newMountMap
+  vMounts <- liftIO newMountMap
 
   let hints = S.defaultHints { S.addrFlags = [S.AI_NUMERICHOST, S.AI_NUMERICSERV], S.addrSocketType = S.Stream }
-  addr:_ <- S.getAddrInfo (Just hints) (Just "0.0.0.0") (Just $ show port)
-  bracket (S.socket (S.addrFamily addr) S.Stream (S.addrProtocol addr)) S.close $ \sock -> do
+  addr:_ <- liftIO $ S.getAddrInfo (Just hints) (Just "0.0.0.0") (Just $ show port)
+  -- obtain a socket and start listening
+  sock <- ContT $ bracket (S.socket (S.addrFamily addr) S.Stream (S.addrProtocol addr)) S.close
+
+  liftIO $ do
     S.setSocketOption sock S.ReuseAddr 1
     S.setSocketOption sock S.NoDelay 1
     S.bind sock $ S.addrAddress addr
     S.listen sock S.maxListenQueue
-    logServer ["Listening on", show port]
 
-    forever $ do
-      (conn, connAddr) <- S.accept sock
-      buf <- newIORef B.empty
-      let respondLoop prefix path = do
-            SB.sendAll conn apiVersion
-            logServer [show connAddr, show path]
-            ref <- newIORef IM.empty
-            vConn <- newMVar conn
-            forever (respond prefix franzReader ref path buf vConn) `finally` do
-              readIORef ref >>= mapM_ killThread
+  logServer ["Listening on", show port]
 
-      forkFinally (runGetRecv buf conn get >>= \case
-        Left _ -> throwIO $ MalformedRequest "Expecting a path"
-        Right pathBS -> do
-          let path = B.unpack pathBS
-          case archivePrefix of
-            -- just start a session without thinking about archives
-            Nothing -> respondLoop livePrefix path
-            -- Mount a squashfs image and increment the counter
-            Just prefix | src <- prefix </> path -> do
-              -- check if an archive exists
-              exist <- doesFileExist src
-              if exist
-                then withSharedResource vMounts path
-                  (mountFuse src (mountPrefix </> path))
-                  (\fuse -> do
-                    -- close the last client's streams
-                    streams <- atomically $ do
-                      streams <- readTVar $ vStreams franzReader
-                      writeTVar (vStreams franzReader) $ HM.delete path streams
-                      pure streams
-                    forM_ (HM.lookup path streams) $ mapM_ closeStream
-                    killFuse fuse (mountPrefix </> path) `finally` do
-                      pid <- getPid fuse
-                      forM_ pid $ \p -> logServer ["Undead squashfuse detected:", show p])
-                  (const $ respondLoop mountPrefix path)
-                else do
-                  logServer ["Archive", src, "doesn't exist; falling back to live streams"]
-                  respondLoop livePrefix path
-        )
-        $ \result -> do
-          case result of
-            Left ex -> case fromException ex of
-              Just e -> SB.sendAll conn $ encode $ ResponseError (-1) e
-              Nothing -> logServer [show ex]
-            Right _ -> return ()
-          S.close conn
-          logServer [show connAddr, "disconnected"]
+  liftIO $ forever $ do
+    (conn, connAddr) <- S.accept sock
 
-logServer :: [String] -> IO ()
-logServer = hPutStrLn stderr . unwords . (:) "[server]"
+    void $ forkFinally (accept Settings{..} vMounts franzReader conn connAddr) $ \result -> do
+      case result of
+        Left ex -> case fromException ex of
+          Just e -> SB.sendAll conn $ encode $ ResponseError (-1) e
+          Nothing -> logServer [show ex]
+        Right _ -> return ()
+      S.close conn
+      logServer [show connAddr, "disconnected"]
+
+accept :: Settings -> ConcurrentResourceMap MountMap ProcessHandle -> FranzReader -> S.Socket -> S.SockAddr -> IO ()
+accept Settings{..} vMounts franzReader conn connAddr = do
+  -- buffer of received octets
+  buf <- newIORef B.empty
+
+  let respondLoop prefix path = do
+        SB.sendAll conn apiVersion
+        logServer [show connAddr, show path]
+        ref <- newIORef IM.empty
+        vConn <- newMVar conn
+        forever (respond prefix franzReader ref path buf vConn) `finally` do
+          readIORef ref >>= mapM_ killThread
+
+  path <- liftIO $ runGetRecv buf conn get >>= \case
+    Left _ -> throwIO $ MalformedRequest "Expecting a path"
+    Right pathBS -> pure $ B.unpack pathBS
+
+  -- when the final reader exits, close all the streams associated to the path
+  let closeGroup = do
+        streams <- atomically $ do
+          streams <- readTVar $ vStreams franzReader
+          writeTVar (vStreams franzReader) $ HM.delete path streams
+          pure streams
+        forM_ (HM.lookup path streams) $ mapM_ closeStream
+
+  case archivePrefix of
+    -- just start a session without thinking about archives
+    Nothing -> respondLoop livePrefix path
+    -- Mount a squashfs image and increment the counter
+    Just prefix | src <- prefix </> path -> do
+      -- check if an archive exists
+      exist <- doesFileExist src
+      if exist
+        then withFuse vMounts closeGroup src (mountPrefix </> path) $ respondLoop mountPrefix path
+        else do
+          logServer ["Archive", src, "doesn't exist; falling back to live streams"]
+          respondLoop livePrefix path
+
+logServer :: MonadIO m => [String] -> m ()
+logServer = liftIO . hPutStrLn stderr . unwords . (:) "[server]"
+
+withFuse :: ConcurrentResourceMap MountMap ProcessHandle
+  -> IO () -- run when the final user is about to exit
+  -> FilePath
+  -> FilePath
+  -> IO a -> IO a
+withFuse vMounts release src dst body = withSharedResource vMounts dst
+  (mountFuse src dst)
+  (\fuse -> do
+    release
+    killFuse fuse dst `finally` do
+      pid <- getPid fuse
+      forM_ pid $ \p -> logServer ["Undead squashfuse detected:", show p])
+  (const body)
 
 mountFuse :: FilePath -> FilePath -> IO ProcessHandle
 mountFuse src dest = do
