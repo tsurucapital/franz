@@ -70,12 +70,6 @@ handleRaw env@Env{..} (RawRequest reqId req) = do
           -- sends a cancel request or we're killed with an
           -- exception.
           atomicModifyIORef' refThreads $ \m -> (IM.insert reqId tid m, ())
-        -- Response is not ready but the user indicated that they
-        -- are not interested in waiting either. While we have no
-        -- work left to do, we do want to send a message back
-        -- saying the response would be a delayed one so that the
-        -- user can give up waiting.
-        | otherwise -> sendHeader env $ ResponseWait reqId
   `catch` \e -> sendHeader env $ ResponseError reqId e
 
 handleRaw env (RawClean reqId) = do
