@@ -9,6 +9,7 @@ module Database.Franz.Network
   , withConnection
   , connect
   , disconnect
+  , StreamName(..)
   , Query(..)
   , ItemRef(..)
   , RequestType(..)
