@@ -34,66 +34,78 @@ import System.IO
 import System.Process (ProcessHandle, spawnProcess, cleanupProcess,
   waitForProcess, getProcessExitCode, getPid)
 
-respond :: FilePath
-  -> FranzReader
-  -> IORef (IM.IntMap ThreadId) -- ^ thread pool
-  -> FilePath -- ^ path
-  -> IORef B.ByteString -- ^ buffer
-  -> MVar S.Socket
-  -> IO ()
-respond prefix env refThreads path buf vConn = do
-  recvConn <- readMVar vConn
-  runGetRecv buf recvConn get >>= \case
-    Right (RawRequest reqId req) -> do
-      let pop result = do
-            case result of
-              Left ex | Just e <- fromException ex -> sendHeader $ ResponseError reqId e
-              _ -> pure ()
-            `finally` popThread reqId
-      handleQuery prefix env path req $ \stream query ->
-        atomically (fmap Right query `catchSTM` (pure . Left)) >>= \case
-          Left e -> sendHeader $ ResponseError reqId e
-          Right (ready, offsets)
-            | ready -> send (Response reqId) stream offsets
-            | otherwise -> do
-              tid <- flip forkFinally pop $ bracket_
-                (atomically $ addActivity stream)
-                (removeActivity stream) $ do
-                  sendHeader $ ResponseWait reqId
-                  offsets' <- atomically $ do
-                    (ready', offsets') <- query
-                    check ready'
-                    pure offsets'
-                  send (Response reqId) stream offsets'
-              -- Store the thread ID of the thread yielding a future
-              -- response such that we can kill it mid-way if user
-              -- sends a cancel request or we're killed with an
-              -- exception.
-              atomicModifyIORef' refThreads $ \m -> (IM.insert reqId tid m, ())
-            -- Response is not ready but the user indicated that they
-            -- are not interested in waiting either. While we have no
-            -- work left to do, we do want to send a message back
-            -- saying the response would be a delayed one so that the
-            -- user can give up waiting.
-            | otherwise -> sendHeader $ ResponseWait reqId
-      `catch` \e -> sendHeader $ ResponseError reqId e
-    Right (RawClean reqId) -> do
-      tid <- popThread reqId
-      mapM_ killThread tid
-    Left err -> throwIO $ MalformedRequest err
-  where
-    popThread reqId = atomicModifyIORef' refThreads
-      $ swap . IM.updateLookupWithKey (\_ _ -> Nothing) reqId
+data Env = Env
+  { prefix :: FilePath
+  , path :: FilePath
+  , franzReader :: FranzReader
+  , refThreads :: IORef (IM.IntMap ThreadId) -- ^ thread pool of pending requests
+  , recvBuffer :: IORef B.ByteString -- ^ received but unconsumed bytes
+  , vConn :: MVar S.Socket -- ^ connection to the client
+  }
 
-    sendHeader x = withMVar vConn $ \conn -> SB.sendAll conn $ encode x
-    send header Stream{..} ((s0, p0), (s1, p1)) = withMVar vConn $ \conn -> do
-      SB.sendAll conn $ encode (header, PayloadHeader s0 s1 p0 indexNames)
-      -- byte offset + number of indices
-      let siz = 8 * (length indexNames + 1)
-      -- Send byte offsets and indices
-      SF.sendFile' conn indexHandle (fromIntegral $ siz * succ s0) (fromIntegral $ siz * (s1 - s0))
-      -- Send payloads
-      SF.sendFile' conn payloadHandle (fromIntegral p0) (fromIntegral $ p1 - p0)
+handleRaw :: Env -> RawRequest -> IO ()
+handleRaw env@Env{..} (RawRequest reqId req) = do
+  let pop result = do
+        case result of
+          Left ex | Just e <- fromException ex -> sendHeader env $ ResponseError reqId e
+          _ -> pure ()
+        `finally` popThread env reqId
+  handleQuery prefix franzReader path req $ \stream query ->
+    atomically (fmap Right query `catchSTM` (pure . Left)) >>= \case
+      Left e -> sendHeader env $ ResponseError reqId e
+      Right (ready, offsets)
+        | ready -> sendContents env (Response reqId) stream offsets
+        | otherwise -> do
+          tid <- flip forkFinally pop $ bracket_
+            (atomically $ addActivity stream)
+            (removeActivity stream) $ do
+              sendHeader env $ ResponseWait reqId
+              offsets' <- atomically $ do
+                (ready', offsets') <- query
+                check ready'
+                pure offsets'
+              sendContents env (Response reqId) stream offsets'
+          -- Store the thread ID of the thread yielding a future
+          -- response such that we can kill it mid-way if user
+          -- sends a cancel request or we're killed with an
+          -- exception.
+          atomicModifyIORef' refThreads $ \m -> (IM.insert reqId tid m, ())
+        -- Response is not ready but the user indicated that they
+        -- are not interested in waiting either. While we have no
+        -- work left to do, we do want to send a message back
+        -- saying the response would be a delayed one so that the
+        -- user can give up waiting.
+        | otherwise -> sendHeader env $ ResponseWait reqId
+  `catch` \e -> sendHeader env $ ResponseError reqId e
+
+handleRaw env (RawClean reqId) = do
+  tid <- popThread env reqId
+  mapM_ killThread tid
+
+-- | Pick up a 'ThreadId' from a pool.
+popThread :: Env -> Int -> IO (Maybe ThreadId)
+popThread Env{..} reqId = atomicModifyIORef' refThreads
+  $ swap . IM.updateLookupWithKey (\_ _ -> Nothing) reqId
+
+sendHeader :: Env -> ResponseHeader -> IO ()
+sendHeader Env{..} x = withMVar vConn $ \conn -> SB.sendAll conn $ encode x
+
+sendContents :: Env -> ResponseHeader -> Stream -> QueryResult -> IO ()
+sendContents Env{..} header Stream{..} ((s0, p0), (s1, p1)) = withMVar vConn $ \conn -> do
+  SB.sendAll conn $ encode (header, PayloadHeader s0 s1 p0 indexNames)
+  -- byte offset + number of indices
+  let siz = 8 * (length indexNames + 1)
+  -- Send byte offsets and indices
+  SF.sendFile' conn indexHandle (fromIntegral $ siz * succ s0) (fromIntegral $ siz * (s1 - s0))
+  -- Send payloads
+  SF.sendFile' conn payloadHandle (fromIntegral p0) (fromIntegral $ p1 - p0)
+
+respond :: Env -> IO ()
+respond env@Env{..} = do
+  recvConn <- readMVar vConn
+  runGetRecv recvBuffer recvConn get >>= \case
+    Right raw -> handleRaw env raw
+    Left err -> throwIO $ MalformedRequest err
 
 data Settings = Settings
   { reapInterval :: Double
@@ -160,17 +172,17 @@ startServer Settings{..} = evalContT $ do
 accept :: Settings -> ConcurrentResourceMap MountMap ProcessHandle -> FranzReader -> S.Socket -> S.SockAddr -> IO ()
 accept Settings{..} vMounts franzReader conn connAddr = do
   -- buffer of received octets
-  buf <- newIORef B.empty
+  recvBuffer <- newIORef B.empty
 
   let respondLoop prefix path = do
         SB.sendAll conn apiVersion
         logServer [show connAddr, show path]
-        ref <- newIORef IM.empty
+        refThreads <- newIORef IM.empty
         vConn <- newMVar conn
-        forever (respond prefix franzReader ref path buf vConn) `finally` do
-          readIORef ref >>= mapM_ killThread
+        forever (respond Env{..}) `finally` do
+          readIORef refThreads >>= mapM_ killThread
 
-  path <- liftIO $ runGetRecv buf conn get >>= \case
+  path <- liftIO $ runGetRecv recvBuffer conn get >>= \case
     Left _ -> throwIO $ MalformedRequest "Expecting a path"
     Right pathBS -> pure $ B.unpack pathBS
 
