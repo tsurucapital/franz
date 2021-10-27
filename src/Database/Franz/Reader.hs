@@ -18,7 +18,6 @@ import qualified Data.HashMap.Strict as HM
 import qualified Data.IntMap.Strict as IM
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector as V
-import Data.Void
 import Data.Maybe (isJust)
 import GHC.Clock (getMonotonicTime)
 import System.Directory
@@ -96,16 +95,16 @@ createStream man path = do
 
   indexHandle <- openFile offsetPath ReadMode
 
-  let final :: Either SomeException Void -> IO ()
+  let final :: Either SomeException () -> IO ()
       final (Left exc) | Just ThreadKilled <- fromException exc = pure ()
       final (Left exc) = logFollower [path, "terminated with", show exc]
-      final (Right v) = absurd v
+      final (Right _) = logFollower [path, "has been removed"]
 
   -- TODO broadcast an exception if it exits?
   followThread <- flip forkFinally final $ do
     forM_ (IM.maxViewWithKey initialOffsets) $ \((i, _), _) ->
       hSeek indexHandle AbsoluteSeek $ fromIntegral $ succ i * icount * 8
-    forever $ do
+    fix $ \self -> do
       bs <- B.hGet indexHandle (8 * icount)
       if B.null bs
         then do
@@ -113,7 +112,11 @@ createStream man path = do
             Outdated -> CaughtUp
             CaughtUp -> CaughtUp
             Gone -> Gone
-          atomically $ readTVar vStatus >>= check . (==Outdated)
+          continue <- atomically $ readTVar vStatus >>= \case
+            CaughtUp -> retry
+            Outdated -> pure True
+            Gone -> pure False
+          when continue self
         else do
           ofs : indices <- either (throwIO . InternalError) pure $ runGet (replicateM icount getI) bs
           atomically $ do
@@ -121,6 +124,7 @@ createStream man path = do
             modifyTVar' vOffsets $ IM.insert i ofs
             forM_ (zip vIndices indices) $ \(v, x) -> modifyTVar' v $ IM.insert (fromIntegral x) i
             writeTVar vCount $! i + 1
+          self
 
   let indices = HM.fromList $ zip indexNames vIndices
 
