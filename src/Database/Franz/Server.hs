@@ -42,6 +42,9 @@ data Env = Env
   , vConn :: MVar S.Socket -- ^ connection to the client
   }
 
+trySTM :: Exception e => STM a -> STM (Either e a)
+trySTM m = fmap Right m `catchSTM` (pure . Left)
+
 handleRaw :: Env -> RawRequest -> IO ()
 handleRaw env@Env{..} (RawRequest reqId req) = do
   let pop result = do
@@ -50,7 +53,7 @@ handleRaw env@Env{..} (RawRequest reqId req) = do
           _ -> pure ()
         `finally` popThread env reqId
   handleQuery prefix franzReader path req $ \stream query ->
-    atomically (fmap Right query `catchSTM` (pure . Left)) >>= \case
+    atomically (trySTM query) >>= \case
       Left e -> sendHeader env $ ResponseError reqId e
       Right (ready, offsets)
         | ready -> sendContents env (Response reqId) stream offsets
@@ -59,11 +62,11 @@ handleRaw env@Env{..} (RawRequest reqId req) = do
             (atomically $ addActivity stream)
             (removeActivity stream) $ do
               sendHeader env $ ResponseWait reqId
-              offsets' <- atomically $ do
-                (ready', offsets') <- query
-                check ready'
-                pure offsets'
-              sendContents env (Response reqId) stream offsets'
+              join $ atomically $ trySTM query >>= \case
+                Left e -> pure $ sendHeader env $ ResponseError reqId e
+                Right (ready', offsets') -> do
+                  check ready'
+                  pure $ sendContents env (Response reqId) stream offsets'
           -- Store the thread ID of the thread yielding a future
           -- response such that we can kill it mid-way if user
           -- sends a cancel request or we're killed with an
