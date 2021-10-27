@@ -18,8 +18,6 @@ import qualified Data.HashMap.Strict as HM
 import qualified Data.IntMap.Strict as IM
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector as V
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as T
 import Data.Void
 import Data.Maybe (isJust)
 import GHC.Clock (getMonotonicTime)
@@ -262,10 +260,7 @@ getFranzDirectory (FranzPrefix prefix) (FranzDirectory dir) = prefix </> dir
 
 getFranzStreamPath :: FranzPrefix -> FranzDirectory -> StreamName -> FilePath
 getFranzStreamPath prefix dir name
-  = getFranzDirectory prefix dir </> streamPathFragment name
-
-streamPathFragment :: StreamName -> FilePath
-streamPathFragment = T.unpack . T.decodeUtf8 . unStreamName
+  = getFranzDirectory prefix dir </> streamNameToPath name
 
 handleQuery :: FranzPrefix
   -> FranzReader

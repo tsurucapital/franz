@@ -6,6 +6,7 @@ module Database.Franz.Protocol
   , defaultPort
   , IndexName
   , StreamName(..)
+  , streamNameToPath
   , FranzException(..)
   , RequestType(..)
   , ItemRef(..)
@@ -21,6 +22,8 @@ import Data.Serialize hiding (getInt64le)
 import Database.Franz.Internal (getInt64le)
 import Data.Hashable (Hashable)
 import Data.String
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 import Network.Socket (PortNumber)
 import GHC.Generics (Generic)
 import qualified Data.ByteString.FastBuilder as BB
@@ -35,6 +38,9 @@ type IndexName = B.ByteString
 
 newtype StreamName = StreamName { unStreamName :: B.ByteString }
   deriving newtype (Show, Eq, Ord, Hashable, Serialize)
+
+streamNameToPath :: StreamName -> FilePath
+streamNameToPath = T.unpack . T.decodeUtf8 . unStreamName
 
 -- | UTF-8 encoded
 instance IsString StreamName where
