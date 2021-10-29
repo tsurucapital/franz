@@ -9,6 +9,7 @@ module Database.Franz.Network
   , withConnection
   , connect
   , disconnect
+  , StreamName(..)
   , Query(..)
   , ItemRef(..)
   , RequestType(..)
@@ -144,7 +145,7 @@ disconnect Connection{..} = do
   killThread connThread
   withMVar connSocket S.close
 
-defQuery :: B.ByteString -> Query
+defQuery :: StreamName -> Query
 defQuery name = Query
   { reqStream = name
   , reqFrom = BySeqNum 0

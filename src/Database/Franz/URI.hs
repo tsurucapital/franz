@@ -5,18 +5,15 @@ module Database.Franz.URI
   , fromFranzPath
   ) where
 
-import qualified Data.ByteString as B
 import Data.List (stripPrefix)
 import Data.String
 import Network.Socket (HostName, PortNumber)
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as T
 import Text.Read (readMaybe)
 
 data FranzPath = FranzPath
   { franzHost :: !HostName
   , franzPort :: !PortNumber
-  , franzPrefix :: !B.ByteString
+  , franzDir :: !FilePath
   -- ^ Prefix of franz directories
   }
 
@@ -27,12 +24,11 @@ toFranzPath uri = do
   (host, path) <- case break (== '/') hostnamePath of
     (h, '/' : p) -> Right (h, p)
     _ -> Left "Expecting /"
-  let path' = T.encodeUtf8 $ T.pack path
   case break (== ':') host of
     (hostname, ':' : portStr)
-        | Just p <- readMaybe portStr -> Right $ FranzPath hostname p path'
+        | Just p <- readMaybe portStr -> Right $ FranzPath hostname p path
         | otherwise -> Left "Failed to parse the port number"
-    _ -> Right $ FranzPath host 1886 path'
+    _ -> Right $ FranzPath host 1886 path
 
 -- | Render 'FranzPath' as a franz URI.
 fromFranzPath :: (Monoid a, IsString a) => FranzPath -> a
@@ -42,5 +38,5 @@ fromFranzPath (FranzPath host port path) = mconcat
   , ":"
   , fromString (show port)
   , "/"
-  , fromString $ T.unpack $ T.decodeUtf8 path
+  , fromString path
   ]

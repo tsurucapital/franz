@@ -9,6 +9,7 @@ import Control.Concurrent.STM
 import Data.Function (fix)
 import Data.Functor.Identity
 import Data.List (foldl')
+import Data.String
 import qualified Data.Vector as V
 import qualified Data.ByteString.Builder as BB
 import qualified Data.ByteString.Char8 as B
@@ -18,7 +19,7 @@ import System.IO
 import System.Console.GetOpt
 import System.Exit
 
-parseHostPort :: String -> (FranzPath -> r) -> B.ByteString -> r
+parseHostPort :: String -> (FranzPath -> r) -> FilePath -> r
 parseHostPort str k = case break (==':') str of
   (host, ':' : port) -> k . FranzPath host (read port)
   (host, _) -> k . FranzPath host defaultPort
@@ -68,8 +69,8 @@ main :: IO ()
 main = getOpt Permute options <$> getArgs >>= \case
   (fs, [name], []) -> do
     let o = foldl' (flip id) defaultOptions fs
-    parseHostPort (host o) withConnection (B.pack $ prefix o) $ \conn -> do
-      let name' = B.pack name
+    parseHostPort (host o) withConnection (prefix o) $ \conn -> do
+      let name' = fromString name
       let timeout' = floor $ timeout o * 1000000
       let f = maybe BySeqNum ByIndex (index o)
       let req i j = Query name' (f i) (f j) AllItems
