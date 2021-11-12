@@ -16,11 +16,20 @@ data FranzPath = FranzPath
   , franzDir :: !FilePath
   -- ^ Prefix of franz directories
   }
+  | LocalFranzPath !FilePath
+  deriving (Show, Eq, Ord)
 
--- | Parse a franz URI (franz://host:port/path).
+localPrefix :: IsString a => a
+localPrefix = "franz-local:"
+
+remotePrefix :: IsString a => a
+remotePrefix = "franz://"
+
+-- | Parse a franz URI (franz://host:port/path or franz-local:path).
 toFranzPath :: String -> Either String FranzPath
+toFranzPath uri | Just path <- stripPrefix localPrefix uri = Right $ LocalFranzPath path
 toFranzPath uri = do
-  hostnamePath <- maybe (Left "Expecting franz://") Right $ stripPrefix "franz://" uri
+  hostnamePath <- maybe (Left $ "Expecting " <> remotePrefix) Right $ stripPrefix remotePrefix uri
   (host, path) <- case break (== '/') hostnamePath of
     (h, '/' : p) -> Right (h, p)
     _ -> Left "Expecting /"
@@ -33,10 +42,12 @@ toFranzPath uri = do
 -- | Render 'FranzPath' as a franz URI.
 fromFranzPath :: (Monoid a, IsString a) => FranzPath -> a
 fromFranzPath (FranzPath host port path) = mconcat
-  [ "franz://"
+  [ remotePrefix
   , fromString host
   , ":"
   , fromString (show port)
   , "/"
   , fromString path
   ]
+
+fromFranzPath (LocalFranzPath path) = localPrefix <> fromString path

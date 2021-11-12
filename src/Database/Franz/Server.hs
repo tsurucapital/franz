@@ -6,6 +6,8 @@ module Database.Franz.Server
   ( Settings(..)
   , startServer
   , defaultPort
+  , mountFuse
+  , killFuse
   ) where
 
 import Control.Concurrent
@@ -52,7 +54,7 @@ handleRaw env@Env{..} (RawRequest reqId req) = do
           Left ex | Just e <- fromException ex -> sendHeader env $ ResponseError reqId e
           _ -> pure ()
         `finally` popThread env reqId
-  handleQuery prefix franzReader path req $ \stream query ->
+  handleQuery prefix franzReader path req throwIO $ \stream query ->
     atomically (trySTM query) >>= \case
       Left e -> sendHeader env $ ResponseError reqId e
       Right (ready, offsets)

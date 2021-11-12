@@ -246,9 +246,18 @@ reaper int life FranzReader{..} = forever $ do
   threadDelay $ floor $ int * 1e6
 
 withFranzReader :: (FranzReader -> IO ()) -> IO ()
-withFranzReader k = do
+withFranzReader = bracket newFranzReader closeFranzReader
+
+newFranzReader :: IO FranzReader
+newFranzReader = do
   vStreams <- newTVarIO HM.empty
-  FS.withManager $ \watchManager -> k FranzReader{..}
+  watchManager <- FS.startManager
+  pure FranzReader{..}
+
+closeFranzReader :: FranzReader -> IO ()
+closeFranzReader FranzReader{..} = do
+  FS.stopManager watchManager
+  readTVarIO vStreams >>= mapM_ (mapM_ closeStream)
 
 -- | Globally-configured path which contains franz directories.
 newtype FranzPrefix = FranzPrefix { unFranzPrefix :: FilePath } deriving (Eq, Hashable)
@@ -270,10 +279,12 @@ handleQuery :: FranzPrefix
   -> FranzReader
   -> FranzDirectory
   -> Query
+  -> (FranzException -> IO r)
   -> (Stream -> STM (Bool, QueryResult) -> IO r) -> IO r
-handleQuery prefix FranzReader{..} dir (Query name begin_ end_ rt) cont
-  = bracket acquire removeActivity
-  $ \stream@Stream{..} -> cont stream $ do
+handleQuery prefix FranzReader{..} dir (Query name begin_ end_ rt) onError cont
+  = bracket (try acquire) (either mempty removeActivity) $ \case
+  Left err -> onError err
+  Right stream@Stream{..} -> cont stream $ do
     readTVar vStatus >>= \case
         Outdated -> retry
         CaughtUp -> pure ()

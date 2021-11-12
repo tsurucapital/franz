@@ -4,3 +4,4 @@
     * `reqStream` now has a type `StreamName`
 * Added `Database.Franz.Reconnect`
 * Added `Database.Franz.URI`
+* Supported reading local franz streams

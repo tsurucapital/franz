@@ -31,19 +31,22 @@ import Control.Exception
 import Control.Monad
 import qualified Data.ByteString.Char8 as B
 import Data.ConcurrentResourceMap
-import qualified Data.HashMap.Strict as HM
 import Data.IORef
 import Data.IORef.Unboxed
-import Data.Int (Int64)
 import qualified Data.IntMap.Strict as IM
 import Data.Serialize hiding (getInt64le)
-import qualified Data.Vector as V
-import qualified Data.Vector.Generic.Mutable as VGM
+import Database.Franz.Contents
 import Database.Franz.Internal
 import Database.Franz.Protocol
+import Database.Franz.Reader
+import Database.Franz.Server
 import Database.Franz.URI
 import qualified Network.Socket as S
 import qualified Network.Socket.ByteString as SB
+import System.Process (ProcessHandle)
+import System.Directory
+import System.FilePath
+import System.IO.Temp
 
 -- The protocol
 --
@@ -79,6 +82,11 @@ data Connection = Connection
                      ConnStateMap
                      (TVar (ResponseStatus Contents)))
   , connThread :: !ThreadId
+  }
+  | LocalConnection
+  { connDir :: FilePath
+  , connReader :: FranzReader
+  , connFuse :: Maybe ProcessHandle
   }
 
 data ResponseStatus a = WaitingInstant
@@ -139,11 +147,25 @@ connect (FranzPath host port dir) = do
       Nothing -> throwSTM e
       Just{} -> pure $ Just (Errored e)
   return Connection{..}
+connect (LocalFranzPath path) = do
+  isLive <- doesDirectoryExist path
+  connReader <- newFranzReader
+  (connDir, connFuse) <- if isLive
+    then pure (path, Nothing)
+    else do
+      tmpDir <- getCanonicalTemporaryDirectory
+      dir <- createTempDirectory (tmpDir </> "franz") (takeBaseName path)
+      fuse <- mountFuse path dir
+      pure (dir, Just fuse)
+  pure LocalConnection{..}
 
 disconnect :: Connection -> IO ()
 disconnect Connection{..} = do
   killThread connThread
   withMVar connSocket S.close
+disconnect LocalConnection{..} =
+  closeFranzReader connReader
+  `finally` mapM_ (\p -> killFuse p connDir) connFuse
 
 defQuery :: StreamName -> Query
 defQuery name = Query
@@ -153,39 +175,11 @@ defQuery name = Query
   , reqType = AllItems
   }
 
-type SomeIndexMap = HM.HashMap IndexName Int64
-
--- | (seqno, indices, payloads)
-type Contents = V.Vector (Int, SomeIndexMap, B.ByteString)
-
 -- | When it is 'Right', it might block until the content arrives.
 type Response = Either Contents (STM Contents)
 
 awaitResponse :: STM (Either a (STM a)) -> STM a
 awaitResponse = (>>=either pure id)
-
-getResponse :: Get Contents
-getResponse = do
-    PayloadHeader s0 s1 p0 names <- get
-    let df = s1 - s0
-    if df <= 0
-        then pure mempty
-        else do
-            ixs <- V.replicateM df $ (,) <$> getInt64le <*> traverse (const getInt64le) names
-            payload <- getByteString $ fst (V.unsafeLast ixs) - p0
-            pure $ V.create $ do
-                vres <- VGM.unsafeNew df
-                let go i ofs0
-                        | i >= df = pure ()
-                        | otherwise = do
-                              let (ofs1, indices) = V.unsafeIndex ixs i
-                                  !m = HM.fromList $ zip names indices
-                                  !bs = B.take (ofs1 - ofs0) $ B.drop (ofs0 - p0) payload
-                                  !num = s0 + i + 1
-                              VGM.unsafeWrite vres i (num, m, bs)
-                              go (i + 1) ofs1
-                go 0 p0
-                return vres
 
 -- | Fetch requested data from the server.
 --
@@ -228,7 +222,6 @@ fetch Connection{..} req cont = do
       $ RawRequest reqId req
 
     let
-      requestFinished = ClientError "request already finished"
 
       getDelayed = readTVar reqVar >>= \case
         RequestFinished -> throwSTM requestFinished
@@ -246,6 +239,24 @@ fetch Connection{..} req cont = do
       WaitingInstant -> retry -- wait for an instant response
       Available xs -> pure $ Left xs
       WaitingDelayed -> pure $ Right getDelayed
+fetch LocalConnection{..} query cont
+  = handleQuery (FranzPrefix "") connReader (FranzDirectory connDir) query
+  (cont . throwSTM)
+  $ \stream transaction -> atomically transaction >>= \case
+    (False, _) -> do
+      vResp <- newEmptyTMVarIO
+      tid <- flip forkFinally (atomically . putTMVar vResp) $ do
+        result <- atomically $ do
+          (ready, result) <- transaction
+          guard ready
+          pure result
+        readContents stream result
+      cont (pure $ Right $ takeTMVar vResp >>= either throwSTM pure)
+        `finally` throwTo tid requestFinished
+    (True, result) -> readContents stream result >>= cont . pure . Left
+
+requestFinished :: FranzException
+requestFinished = ClientError "request already finished"
 
 -- | Send a single query and wait for the result. If it timeouts, it returns an empty list.
 fetchSimple :: Connection
