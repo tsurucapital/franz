@@ -48,7 +48,7 @@ withFd h f = withHandle_ "withFd" h $ \ Handle__{..} -> do
                         "handle is not a file descriptor")
     Just fd -> f (Fd (fromIntegral (FD.fdFD fd)))
 
-foreign import ccall unsafe "pread"
+foreign import ccall safe "pread"
   c_pread :: Fd -> Ptr Word8 -> CSize -> CSize -> IO CSize
 
 hGetRange :: Handle -> Int -> Int -> IO B.ByteString

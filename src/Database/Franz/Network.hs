@@ -255,7 +255,11 @@ fetch LocalConnection{..} query cont
         readContents stream result
       cont (pure $ Right $ takeTMVar vResp >>= either throwSTM pure)
         `finally` throwTo tid requestFinished
-    (True, result) -> readContents stream result >>= cont . pure . Left
+    (True, result) -> do
+      vResp <- newEmptyTMVarIO
+      tid <- forkFinally (readContents stream result) (atomically . putTMVar vResp)
+      cont (takeTMVar vResp >>= either throwSTM (pure . Left))
+        `finally` throwTo tid requestFinished
 
 requestFinished :: FranzException
 requestFinished = ClientError "request already finished"
