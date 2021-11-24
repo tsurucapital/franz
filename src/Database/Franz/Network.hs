@@ -154,7 +154,9 @@ connect (LocalFranzPath path) = do
     then pure (path, Nothing)
     else do
       tmpDir <- getCanonicalTemporaryDirectory
-      dir <- createTempDirectory (tmpDir </> "franz") (takeBaseName path)
+      let tmpDir' = tmpDir </> "franz"
+      createDirectoryIfMissing True tmpDir'
+      dir <- createTempDirectory tmpDir' (takeBaseName path)
       fuse <- mountFuse path dir
       pure (dir, Just fuse)
   pure LocalConnection{..}
