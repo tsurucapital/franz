@@ -19,7 +19,7 @@ import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception (IOException)
 import Control.Monad.Catch
-import Database.Franz.Network
+import Database.Franz.Client
 import Database.Franz.URI
 
 data Pool = Pool

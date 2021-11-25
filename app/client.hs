@@ -1,7 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 module Main where
 import Database.Franz.URI
-import Database.Franz.Network
+import Database.Franz.Client
 
 import Control.Monad
 import Control.Concurrent.STM

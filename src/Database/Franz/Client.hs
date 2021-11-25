@@ -3,7 +3,7 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TypeFamilies #-}
-module Database.Franz.Network
+module Database.Franz.Client
   ( defaultPort
   , Connection
   , withConnection

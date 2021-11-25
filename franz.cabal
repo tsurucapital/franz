@@ -27,7 +27,7 @@ library
       Database.Franz.Contents
       Database.Franz.Reader
       Database.Franz.Server
-      Database.Franz.Network
+      Database.Franz.Client
       Database.Franz.Protocol
       Database.Franz.Reconnect
       Database.Franz.URI
