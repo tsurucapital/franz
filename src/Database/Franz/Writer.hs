@@ -2,7 +2,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Database.Franz (
+module Database.Franz.Writer (
     -- * Writer interface
     WriterHandle,
     openWriter,

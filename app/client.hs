@@ -1,6 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
 module Main where
-import Database.Franz
 import Database.Franz.URI
 import Database.Franz.Network
 
