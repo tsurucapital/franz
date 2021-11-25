@@ -20,7 +20,6 @@ import Control.Concurrent.STM
 import Control.Exception (IOException)
 import Control.Monad.Catch
 import Database.Franz.Client
-import Database.Franz.URI
 
 data Pool = Pool
   { poolPath :: FranzPath

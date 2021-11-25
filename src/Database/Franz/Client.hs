@@ -4,7 +4,10 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TypeFamilies #-}
 module Database.Franz.Client
-  ( defaultPort
+  ( FranzPath(..)
+  , fromFranzPath
+  , toFranzPath
+  , defaultPort
   , Connection
   , withConnection
   , connect
