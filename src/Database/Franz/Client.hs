@@ -19,7 +19,6 @@ module Database.Franz.Client
   , defQuery
   , Response
   , awaitResponse
-  , SomeIndexMap
   , Contents
   , fetch
   , fetchSimple
@@ -142,10 +141,10 @@ connect (FranzPath host port dir) = do
       withRequest i . traverse $ \case
         WaitingInstant -> pure (Available resp)
         WaitingDelayed -> pure (Available resp)
-        e -> throwSTM $ ClientError $ "Unexpected state on ResponseInstant " ++ show i ++ ": " ++ show e
+        _ -> throwSTM $ ClientError $ "Unexpected state on ResponseInstant " ++ show i
     ResponseWait i -> withRequest i . traverse $ \case
       WaitingInstant -> pure WaitingDelayed
-      e -> throwSTM $ ClientError $ "Unexpected state on ResponseWait " ++ show i ++ ": " ++ show e
+      _ -> throwSTM $ ClientError $ "Unexpected state on ResponseWait " ++ show i
     ResponseError i e -> withRequest i $ \case
       Nothing -> throwSTM e
       Just{} -> pure $ Just (Errored e)
@@ -267,12 +266,13 @@ fetch LocalConnection{..} query cont
 requestFinished :: FranzException
 requestFinished = ClientError "request already finished"
 
--- | Send a single query and wait for the result. If it timeouts, it returns an empty list.
+-- | Send a single query and wait for the result.
 fetchSimple :: Connection
   -> Int -- ^ timeout in microseconds
   -> Query
-  -> IO Contents
-fetchSimple conn timeout req = fetch conn req (fmap (maybe mempty id) . atomicallyWithin timeout . awaitResponse)
+  -> IO (Maybe Contents)
+fetchSimple conn timeout req = fetch conn req
+  $ atomicallyWithin timeout . awaitResponse
 
 atomicallyWithin :: Int -- ^ timeout in microseconds
   -> STM a

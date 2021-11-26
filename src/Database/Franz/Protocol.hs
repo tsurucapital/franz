@@ -27,6 +27,7 @@ import qualified Data.Text.Encoding as T
 import Network.Socket (PortNumber)
 import GHC.Generics (Generic)
 import qualified Data.ByteString.FastBuilder as BB
+import qualified Data.Vector as V
 
 apiVersion :: B.ByteString
 apiVersion = B.pack "0"
@@ -86,9 +87,13 @@ data ResponseHeader = Response !ResponseId
 instance Serialize ResponseHeader
 
 -- | Initial seqno, final seqno, base offset, index names
-data PayloadHeader = PayloadHeader !Int !Int !Int ![B.ByteString]
+data PayloadHeader = PayloadHeader !Int !Int !Int !(V.Vector IndexName)
 
 instance Serialize PayloadHeader where
-  put (PayloadHeader s t u xs) = f s *> f t *> f u *> put xs where
+  put (PayloadHeader s t u xs) = f s *> f t *> f u
+    *> put (V.length xs) *> mapM_ put xs where
     f = putInt64le . fromIntegral
-  get = PayloadHeader <$> getInt64le <*> getInt64le <*> getInt64le <*> get
+  get = PayloadHeader <$> getInt64le <*> getInt64le <*> getInt64le
+    <*> do
+      len <- get
+      V.replicateM len get

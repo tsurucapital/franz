@@ -30,7 +30,7 @@ data StreamStatus = CaughtUp | Outdated | Gone deriving Eq
 data Stream = Stream
   { streamPath :: FilePath
   , vOffsets :: !(TVar (IM.IntMap Int))
-  , indexNames :: ![IndexName]
+  , indexNames :: !(V.Vector IndexName)
   , indices :: !(HM.HashMap IndexName (TVar (IM.IntMap Int)))
   , vCount :: !(TVar Int)
   , vStatus :: !(TVar StreamStatus)
@@ -70,8 +70,8 @@ createStream man path = do
   unless exist $ throwIO $ StreamNotFound offsetPath
   initialOffsetsBS <- B.readFile offsetPath
   payloadHandle <- openBinaryFile payloadPath ReadMode
-  indexNames <- B.lines <$> B.readFile (path </> "indices")
-  let icount = 1 + length indexNames
+  indexNames <- V.fromList . B.lines <$> B.readFile (path </> "indices")
+  let icount = 1 + V.length indexNames
   let count = B.length initialOffsetsBS `div` (8 * icount)
   let getI = fromIntegral <$> getInt64le
   initialIndices <- either (throwIO . InternalError) pure
@@ -90,7 +90,7 @@ createStream man path = do
       FS.Removed _ _ _ -> atomically $ writeTVar vStatus Gone
       _ -> pure ()
 
-  vIndices <- forM [1..length indexNames] $ \i -> newTVarIO
+  vIndices <- forM [1..V.length indexNames] $ \i -> newTVarIO
     $ IM.fromList $ V.toList $ V.zip (V.map (U.! i) initialIndices) (V.enumFromN 0 count)
 
   indexHandle <- openFile offsetPath ReadMode
@@ -126,7 +126,7 @@ createStream man path = do
             writeTVar vCount $! i + 1
           self
 
-  let indices = HM.fromList $ zip indexNames vIndices
+  let indices = HM.fromList $ zip (V.toList indexNames) vIndices
 
   vActivity <- getMonotonicTime >>= newTVarIO . Left
   return Stream{ streamPath = path, ..}

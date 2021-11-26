@@ -2,6 +2,7 @@
 module Main where
 import Database.Franz.URI
 import Database.Franz.Client
+import qualified Database.Franz.Contents as C
 
 import Control.Monad
 import Control.Concurrent.STM
@@ -58,8 +59,8 @@ defaultOptions = Options
   , prefix = ""
   }
 
-printBS :: Options -> (a, b, B.ByteString) -> IO ()
-printBS o (_, _, bs) = do
+printBS :: Options -> C.Item -> IO ()
+printBS o C.Item{C.payload = bs} = do
   BB.hPutBuilder stdout $ BB.word64LE $ fromIntegral $ B.length bs
   B.hPutStr stdout bs
   hFlush stdout
@@ -74,11 +75,11 @@ main = getOpt Permute options <$> getArgs >>= \case
       let f = maybe BySeqNum ByIndex (index o)
       let req i j = Query name' (f i) (f j) AllItems
       forM_ (reverse $ ranges o) $ \(i, j) -> fetchSimple conn timeout' (req i j)
-        >>= mapM_ (printBS o)
+        >>= mapM_ (printBS o) . maybe [] C.toList
       forM_ (beginning o) $ \start -> flip fix start $ \self i -> do
-        bss <- fetchSimple conn timeout' (req i i)
+        bss <- maybe [] C.toList <$> fetchSimple conn timeout' (req i i)
         mapM_ (printBS o) bss
-        unless (null bss) $ self $ let (j, _, _) = V.last bss in j + 1
+        unless (null bss) $ self $ C.seqNo (last bss) + 1
 
   (_, _, es) -> do
     name <- getProgName
