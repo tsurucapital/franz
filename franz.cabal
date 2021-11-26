@@ -23,6 +23,7 @@ source-repository head
 library
   exposed-modules:
       Database.Franz.Writer
+      Database.Franz.Writer.Simple
       Database.Franz.Internal
       Database.Franz.Contents
       Database.Franz.Reader
