@@ -75,7 +75,9 @@ executable franz
     , network
     , stm
     , vector
+    , optparse-applicative
   default-language: Haskell2010
+  ghc-options: -Wall
 
 executable franzd
   main-is: server.hs
