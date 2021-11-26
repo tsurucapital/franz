@@ -59,20 +59,18 @@ franzd --live /path/to/live --archive /path/to/archive
 
 [1]: https://kafka.apache.org/documentation/#design
 
-## API
+## Client API
 
 You can obtain a `Connection` to a remote franz file with `withConnection`.
 It tries to mount a squashfs image at `path`. This is shared between connections, and unmounts when the last client closes the connection.
 
 ```haskell
+toFranzPath :: String -> Either String FranzPath
+
 withConnection :: (MonadIO m, MonadMask m)
-  => String -- host
-  -> Int -- port
-  -> ByteString -- path
+  => FranzPath
   -> (Connection -> m r) -> m r
 ```
-
-`fetch` returns a list of triples of offsets, tags, and payloads.
 
 ```haskell
 data RequestType = AllItems | LastItem deriving (Show, Generic)
@@ -87,10 +85,6 @@ data Query = Query
   , reqType :: !RequestType
   } deriving (Show, Generic)
 
-type SomeIndexMap = HM.HashMap IndexName Int64
-
-type Contents = [(Int, SomeIndexMap, B.ByteString)]
-
 -- | When it is 'Right', it blocks until the content is available on the server.
 type Response = Either Contents (STM Contents)
 
@@ -101,16 +95,16 @@ fetch :: Connection
   -> IO r
 ```
 
-## franz CLI: reading
+`Contents` is a datatype containing triples of sequential numbers, indices and payloads. It is recommended to import `Database.Franz.Contents` qualified.
 
-Read 0th to 9th elements
+```haskell
+data Contents
 
+data Item = Item
+  { seqNo :: !Int
+  , indices :: !(U.Vector Int64)
+  , payload :: !B.ByteString
+  } deriving (Show, Eq)
+
+toList :: Contents -> [Item]
 ```
-franz test -r 0:9
-```
-
-Follow a stream
-
-```
-franz test -b _1
-``
