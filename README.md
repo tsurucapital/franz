@@ -61,6 +61,8 @@ franzd --live /path/to/live --archive /path/to/archive
 
 ## Client API
 
+`Database.Franz.Client` exposes the client API.
+
 You can obtain a `Connection` to a remote franz file with `withConnection`.
 It tries to mount a squashfs image at `path`. This is shared between connections, and unmounts when the last client closes the connection.
 
@@ -108,3 +110,30 @@ data Item = Item
 
 toList :: Contents -> [Item]
 ```
+
+## Writer API
+
+`Database.Franz.Writer` provides the writer interface.
+
+```haskell
+withWriter :: Foldable f
+  => f String
+  -> FilePath
+  -> (WriterHandle f -> IO a)
+  -> IO a
+```
+
+`withWriter` acquires a handle. The `f String` parameter represents a list of index names.
+
+```haskell
+write :: Foldable f
+  => WriterHandle f
+  -> f Int64 -- ^ index values
+  -> Builder -- ^ payload
+  -> IO Int
+flush :: WriterHandle f -> IO ()
+```
+
+`write` appends a payload to the stream. `f Int64` is the list of index values, and it has to have the same length as the one you specified in `withWriter`. Changes will be written to disk whenever the buffer gets full or you call `flush`.
+
+If you don't need the index mechanism, you can use `Database.Franz.Writer.Simple` instead.

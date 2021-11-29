@@ -1,3 +1,8 @@
+# v0.5
+
+* Renamed internal modules under `Internal` prefix
+* Renamed `Database.Franz.Reconnect` to `Database.Franz.Client.Reconnect`
+
 # v0.4
 
 * Added `StreamName`
