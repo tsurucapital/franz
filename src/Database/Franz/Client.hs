@@ -37,7 +37,7 @@ import Data.IORef
 import Data.IORef.Unboxed
 import qualified Data.IntMap.Strict as IM
 import Data.Serialize hiding (getInt64le)
-import Database.Franz.Contents
+import Database.Franz.Internal.Contents
 import Database.Franz.Internal.Fuse
 import Database.Franz.Internal.IO
 import Database.Franz.Internal.Protocol

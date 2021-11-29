@@ -29,6 +29,7 @@ library
       Database.Franz.Internal.Reader
       Database.Franz.Server
       Database.Franz.Client
+      Database.Franz.Internal.Contents
       Database.Franz.Internal.Fuse
       Database.Franz.Internal.Protocol
       Database.Franz.Client.Reconnect
