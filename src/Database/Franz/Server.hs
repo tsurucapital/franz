@@ -5,6 +5,7 @@
 module Database.Franz.Server
   ( Settings(..)
   , startServer
+  , FranzPrefix(..)
   , defaultPort
   ) where
 

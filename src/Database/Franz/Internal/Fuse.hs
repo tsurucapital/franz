@@ -2,7 +2,7 @@
 {-# LANGUAGE RankNTypes #-}
 module Database.Franz.Internal.Fuse where
 
-import Control.Exception
+import Control.Exception hiding (throw)
 import Control.Monad (when)
 import Control.Retry
 import System.Directory
