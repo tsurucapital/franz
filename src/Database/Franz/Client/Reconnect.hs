@@ -2,7 +2,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
-module Database.Franz.Reconnect
+module Database.Franz.Client.Reconnect
   ( Pool
   , poolLogFunc
   , poolRetryPolicy

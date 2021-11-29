@@ -1,6 +1,6 @@
 {-# LANGUAGE ApplicativeDo #-}
 module Main where
-import Database.Franz.URI
+import Database.Franz.Internal.URI
 import Database.Franz.Client
 import qualified Database.Franz.Contents as C
 

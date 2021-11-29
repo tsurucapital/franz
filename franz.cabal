@@ -24,14 +24,14 @@ library
   exposed-modules:
       Database.Franz.Writer
       Database.Franz.Writer.Simple
-      Database.Franz.Internal
+      Database.Franz.Internal.IO
       Database.Franz.Contents
-      Database.Franz.Reader
+      Database.Franz.Internal.Reader
       Database.Franz.Server
       Database.Franz.Client
-      Database.Franz.Protocol
-      Database.Franz.Reconnect
-      Database.Franz.URI
+      Database.Franz.Internal.Protocol
+      Database.Franz.Client.Reconnect
+      Database.Franz.Internal.URI
   hs-source-dirs:
       src
   build-depends:

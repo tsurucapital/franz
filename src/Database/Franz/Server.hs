@@ -17,9 +17,9 @@ import Control.Monad.IO.Class
 import Control.Monad.Trans.Cont
 import Control.Retry
 import Control.Concurrent.STM
-import Database.Franz.Internal
-import Database.Franz.Protocol
-import Database.Franz.Reader
+import Database.Franz.Internal.IO
+import Database.Franz.Internal.Protocol
+import Database.Franz.Internal.Reader
 import Data.ConcurrentResourceMap
 import Data.Serialize
 import qualified Data.IntMap.Strict as IM

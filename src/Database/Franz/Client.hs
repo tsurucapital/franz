@@ -38,11 +38,11 @@ import Data.IORef.Unboxed
 import qualified Data.IntMap.Strict as IM
 import Data.Serialize hiding (getInt64le)
 import Database.Franz.Contents
-import Database.Franz.Internal
-import Database.Franz.Protocol
-import Database.Franz.Reader
+import Database.Franz.Internal.IO
+import Database.Franz.Internal.Protocol
+import Database.Franz.Internal.Reader
 import Database.Franz.Server
-import Database.Franz.URI
+import Database.Franz.Internal.URI
 import qualified Network.Socket as S
 import qualified Network.Socket.ByteString as SB
 import System.Process (ProcessHandle)

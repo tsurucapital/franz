@@ -1,7 +1,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralisedNewtypeDeriving #-}
-module Database.Franz.Protocol
+module Database.Franz.Internal.Protocol
   ( apiVersion
   , defaultPort
   , IndexName
@@ -19,7 +19,7 @@ module Database.Franz.Protocol
 import Control.Exception (Exception)
 import qualified Data.ByteString.Char8 as B
 import Data.Serialize hiding (getInt64le)
-import Database.Franz.Internal (getInt64le)
+import Database.Franz.Internal.IO (getInt64le)
 import Data.Hashable (Hashable)
 import Data.String
 import qualified Data.Text as T

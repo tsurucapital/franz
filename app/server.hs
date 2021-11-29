@@ -1,6 +1,6 @@
 module Main where
 
-import Database.Franz.Reader (FranzPrefix(..))
+import Database.Franz.Internal.Reader (FranzPrefix(..))
 import Database.Franz.Server
 import Options.Applicative
 

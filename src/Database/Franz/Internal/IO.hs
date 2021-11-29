@@ -1,5 +1,5 @@
 {-# LANGUAGE RecordWildCards #-}
-module Database.Franz.Internal (getInt64le, runGetRecv, hGetRange) where
+module Database.Franz.Internal.IO (getInt64le, runGetRecv, hGetRange) where
 
 import Data.IORef
 import Data.Serialize hiding (getInt64le)

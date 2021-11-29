@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE GeneralisedNewtypeDeriving #-}
-module Database.Franz.Reader where
+module Database.Franz.Internal.Reader where
 
 import Control.Concurrent
 import Control.Concurrent.STM
@@ -12,7 +12,7 @@ import Control.Monad.State.Strict
 import Control.Monad.Trans.Maybe
 import Data.Hashable (Hashable)
 import Data.Serialize
-import Database.Franz.Protocol
+import Database.Franz.Internal.Protocol
 import qualified Data.ByteString.Char8 as B
 import qualified Data.HashMap.Strict as HM
 import qualified Data.IntMap.Strict as IM

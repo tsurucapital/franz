@@ -19,9 +19,9 @@ import Data.Serialize hiding (getInt64le)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as U
-import Database.Franz.Internal
-import Database.Franz.Protocol
-import Database.Franz.Reader
+import Database.Franz.Internal.Reader
+import Database.Franz.Internal.Protocol
+import Database.Franz.Internal.IO
 import Data.Int
 import Prelude hiding (length, last)
 

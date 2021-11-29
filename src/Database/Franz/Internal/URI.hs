@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module Database.Franz.URI
+module Database.Franz.Internal.URI
   ( FranzPath(..)
   , toFranzPath
   , fromFranzPath
