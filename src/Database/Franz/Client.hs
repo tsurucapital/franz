@@ -38,10 +38,10 @@ import Data.IORef.Unboxed
 import qualified Data.IntMap.Strict as IM
 import Data.Serialize hiding (getInt64le)
 import Database.Franz.Contents
+import Database.Franz.Internal.Fuse
 import Database.Franz.Internal.IO
 import Database.Franz.Internal.Protocol
 import Database.Franz.Internal.Reader
-import Database.Franz.Server
 import Database.Franz.Internal.URI
 import qualified Network.Socket as S
 import qualified Network.Socket.ByteString as SB
@@ -159,7 +159,7 @@ connect (LocalFranzPath path) = do
       let tmpDir' = tmpDir </> "franz"
       createDirectoryIfMissing True tmpDir'
       dir <- createTempDirectory tmpDir' (takeBaseName path)
-      fuse <- mountFuse path dir
+      fuse <- mountFuse mempty (throwIO . InternalError) path dir
       pure (dir, Just fuse)
   pure LocalConnection{..}
 
@@ -169,7 +169,7 @@ disconnect Connection{..} = do
   withMVar connSocket S.close
 disconnect LocalConnection{..} =
   closeFranzReader connReader
-  `finally` mapM_ (\p -> killFuse p connDir) connFuse
+  `finally` mapM_ (\p -> killFuse mempty p connDir) connFuse
 
 defQuery :: StreamName -> Query
 defQuery name = Query

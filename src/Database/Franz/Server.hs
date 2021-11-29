@@ -6,8 +6,6 @@ module Database.Franz.Server
   ( Settings(..)
   , startServer
   , defaultPort
-  , mountFuse
-  , killFuse
   ) where
 
 import Control.Concurrent
@@ -15,8 +13,8 @@ import Control.Exception
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Cont
-import Control.Retry
 import Control.Concurrent.STM
+import Database.Franz.Internal.Fuse
 import Database.Franz.Internal.IO
 import Database.Franz.Internal.Protocol
 import Database.Franz.Internal.Reader
@@ -32,8 +30,7 @@ import qualified Network.Socket.ByteString as SB
 import qualified Network.Socket as S
 import System.Directory
 import System.IO
-import System.Process (ProcessHandle, spawnProcess, cleanupProcess,
-  waitForProcess, getProcessExitCode, getPid)
+import System.Process (ProcessHandle, getPid)
 
 data Env = Env
   { prefix :: FranzPrefix
@@ -214,36 +211,10 @@ withFuse :: ConcurrentResourceMap MountMap ProcessHandle
   -> FilePath
   -> IO a -> IO a
 withFuse vMounts release src dst body = withSharedResource vMounts dst
-  (mountFuse src dst)
+  (mountFuse logServer (throwIO . InternalError) src dst)
   (\fuse -> do
     release
-    killFuse fuse dst `finally` do
+    killFuse logServer fuse dst `finally` do
       pid <- getPid fuse
       forM_ pid $ \p -> logServer ["Undead squashfuse detected:", show p])
   (const body)
-
-mountFuse :: FilePath -> FilePath -> IO ProcessHandle
-mountFuse src dest = do
-  createDirectoryIfMissing True dest
-  logServer ["squashfuse", "-f", src, dest]
-  bracketOnError (spawnProcess "squashfuse" ["-f", src, dest]) (flip killFuse dest) $ \fuse -> do
-    -- It keeps process handles so that mounted directories are cleaned up
-    -- but there's no easy way to tell when squashfuse finished mounting.
-    -- Wait until the destination becomes non-empty.
-    notMounted <- retrying (limitRetries 5 <> exponentialBackoff 100000) (const pure)
-      $ \status -> getProcessExitCode fuse >>= \case
-        Nothing -> do
-          logServer ["Waiting for squashfuse to mount", src, ":", show status]
-          null <$> listDirectory dest
-        Just e -> do
-          removeDirectory dest
-          throwIO $ InternalError $ "squashfuse exited with " <> show e
-    when notMounted $ throwIO $ InternalError $ "Failed to mount " <> src
-    return fuse
-
-killFuse :: ProcessHandle -> FilePath -> IO ()
-killFuse fuse path = do
-  cleanupProcess (Nothing, Nothing, Nothing, fuse)
-  e <- waitForProcess fuse
-  logServer ["squashfuse:", show e]
-  removeDirectory path
