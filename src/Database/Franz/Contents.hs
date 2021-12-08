@@ -6,6 +6,7 @@ module Database.Franz.Contents
   , Database.Franz.Internal.Contents.indexNames
   , Item(..)
   , toList
+  , toVector
   , last
   , length
   , index
