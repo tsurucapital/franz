@@ -29,6 +29,9 @@ data Item = Item
 toList :: Contents -> [Item]
 toList contents = [unsafeIndex contents i | i <- [0..length contents - 1]]
 
+toVector :: Contents -> V.Vector Item
+toVector contents = V.generate (length contents) (unsafeIndex contents)
+
 last :: Contents -> Maybe Item
 last contents
   | i >= 0 = Just $ unsafeIndex contents i
