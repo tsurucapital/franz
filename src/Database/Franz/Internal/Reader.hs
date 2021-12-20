@@ -140,14 +140,14 @@ range :: Int -- ^ from
   -> Int -- ^ to
   -> RequestType
   -> IM.IntMap Int -- ^ offsets
-  -> (Bool, QueryResult)
+  -> Maybe QueryResult
 range begin end rt allOffsets = case rt of
-    AllItems -> (ready, (firstItem, maybe firstItem fst $ IM.maxViewWithKey body))
+    AllItems -> (firstItem, maybe firstItem fst $ IM.maxViewWithKey body) <$ guard ready
     LastItem -> case IM.maxViewWithKey body of
-      Nothing -> (False, (zero, zero))
+      Nothing -> Nothing
       Just (ofs', r) -> case IM.maxViewWithKey (IM.union left r) of
-        Just (ofs, _) -> (ready, (ofs, ofs'))
-        Nothing -> (ready, (zero, ofs'))
+        Just (ofs, _) -> (ofs, ofs') <$ guard ready
+        Nothing -> (zero, ofs') <$ guard ready
   where
     zero = (-1, 0)
     ready = isJust lastItem || not (null cont)
@@ -280,7 +280,7 @@ handleQuery :: FranzPrefix
   -> FranzDirectory
   -> Query
   -> (FranzException -> IO r)
-  -> (Stream -> STM (Bool, QueryResult) -> IO r) -> IO r
+  -> (Stream -> STM (Maybe QueryResult) -> IO r) -> IO r
 handleQuery prefix FranzReader{..} dir (Query name begin_ end_ rt) onError cont
   = bracket (try acquire) (either mempty removeActivity) $ \case
   Left err -> onError err

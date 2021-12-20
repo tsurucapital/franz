@@ -247,17 +247,14 @@ fetch LocalConnection{..} query cont
   = handleQuery (FranzPrefix "") connReader (FranzDirectory connDir) query
   (cont . throwSTM)
   $ \stream transaction -> atomically transaction >>= \case
-    (False, _) -> do
+    Nothing -> do
       vResp <- newEmptyTMVarIO
       tid <- flip forkFinally (atomically . putTMVar vResp) $ do
-        result <- atomically $ do
-          (ready, result) <- transaction
-          guard ready
-          pure result
+        result <- atomically $ transaction >>= maybe retry pure
         readContents stream result
       cont (pure $ Right $ takeTMVar vResp >>= either throwSTM pure)
         `finally` throwTo tid requestFinished
-    (True, result) -> do
+    Just result -> do
       vResp <- newEmptyTMVarIO
       tid <- forkFinally (readContents stream result) (atomically . putTMVar vResp)
       cont (takeTMVar vResp >>= either throwSTM (pure . Left))

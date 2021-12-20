@@ -55,18 +55,17 @@ handleRaw env@Env{..} (RawRequest reqId req) = do
   handleQuery prefix franzReader path req throwIO $ \stream query ->
     atomically (trySTM query) >>= \case
       Left e -> sendHeader env $ ResponseError reqId e
-      Right (ready, offsets)
-        | ready -> sendContents env (Response reqId) stream offsets
-        | otherwise -> do
+      Right (Just offsets) -> sendContents env (Response reqId) stream offsets
+      Right Nothing -> do
           tid <- flip forkFinally pop $ bracket_
             (atomically $ addActivity stream)
             (removeActivity stream) $ do
               sendHeader env $ ResponseWait reqId
               join $ atomically $ trySTM query >>= \case
                 Left e -> pure $ sendHeader env $ ResponseError reqId e
-                Right (ready', offsets') -> do
-                  check ready'
-                  pure $ sendContents env (Response reqId) stream offsets'
+                Right Nothing -> retry
+                Right (Just offsets) ->  
+                  pure $ sendContents env (Response reqId) stream offsets
           -- Store the thread ID of the thread yielding a future
           -- response such that we can kill it mid-way if user
           -- sends a cancel request or we're killed with an
