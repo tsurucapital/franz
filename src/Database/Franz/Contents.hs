@@ -51,7 +51,7 @@ unsafeIndex Contents{..} i = Item{..}
     ofs0 = maybe payloadOffset fst $ indicess V.!? (i - 1)
     (ofs1, indices) = indicess V.! i
     seqNo = seqnoOffset + i + 1
-    payload = B.take (ofs1 - payloadOffset) $ B.drop (ofs0 - payloadOffset) payloads
+    payload = B.take (ofs1 - ofs0) $ B.drop (ofs0 - payloadOffset) payloads
 
 lookupIndex :: Contents -> IndexName -> Maybe (Item -> Int64)
 lookupIndex Contents{indexNames} name
