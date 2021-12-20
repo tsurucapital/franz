@@ -133,8 +133,8 @@ createStream man path = do
   where
     logFollower = hPutStrLn stderr . unwords . (:) "[follower]"
 
-type QueryResult = ((Int, Int) -- starting SeqNo, byte offset
-    , (Int, Int)) -- ending SeqNo, byte offset
+type QueryResult = ((Int, Int) -- SeqNo *before* the first result, byte offset
+    , (Int, Int)) -- SeqNo of the last result, byte offset
 
 range :: Int -- ^ from
   -> Int -- ^ to
@@ -144,11 +144,23 @@ range :: Int -- ^ from
 range begin end rt allOffsets = case rt of
     AllItems -> (firstItem, maybe firstItem fst $ IM.maxViewWithKey body) <$ guard ready
     LastItem -> case IM.maxViewWithKey body of
-      Nothing -> Nothing
+      Nothing -> (zero, zero) <$ guard ready
       Just (ofs', r) -> case IM.maxViewWithKey (IM.union left r) of
         Just (ofs, _) -> (ofs, ofs') <$ guard ready
         Nothing -> (zero, ofs') <$ guard ready
+    FirstItem -> case IM.minViewWithKey body of
+      Nothing -> (zero, zero) <$ guard ready
+      Just (ofs', _) -> case IM.maxViewWithKey left of
+        Just (ofs, _) -> (ofs, ofs') <$ guard ready
+        Nothing -> (zero, ofs') <$ guard ready
   where
+    ------------------------------------
+    --          begin     end
+    --            v        v
+    -- |    wing     | lastItem | cont |
+    -- | left |      body       |      |
+    ------------------------------------
+
     zero = (-1, 0)
     ready = isJust lastItem || not (null cont)
     (wing, lastItem, cont) = IM.splitLookup end allOffsets

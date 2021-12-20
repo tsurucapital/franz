@@ -56,7 +56,10 @@ data FranzException = MalformedRequest !String
 instance Serialize FranzException
 instance Exception FranzException
 
-data RequestType = AllItems | LastItem deriving (Show, Generic)
+data RequestType = AllItems
+  | LastItem
+  | FirstItem
+  deriving (Show, Generic)
 instance Serialize RequestType
 
 data ItemRef = BySeqNum !Int -- ^ sequential number
