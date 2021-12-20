@@ -1,3 +1,8 @@
+# v0.5.1
+
+* Fixed the bug adding all the following payloads in the result of `index`
+* Added `FirstItem` to `RequestType`
+
 # v0.5
 
 * Renamed internal modules under `Internal` prefix
