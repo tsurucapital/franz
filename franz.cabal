@@ -1,12 +1,12 @@
 cabal-version:  2.0
-version:        0.5.1
+version:        0.5.2
 name:           franz
 description:    Please see the README on GitHub at <https://github.com/tsurucapital/franz#readme>
 homepage:       https://github.com/tsurucapital/franz#readme
 bug-reports:    https://github.com/tsurucapital/franz/issues
 author:         Fumiaki Kinoshita
 maintainer:     fumiexcel@gmail.com
-copyright:      Copyright (c) 2021 Fumiaki Kinoshita
+copyright:      Copyright (c) 2022 Fumiaki Kinoshita
 license:        BSD3
 license-file:   LICENSE
 build-type:     Simple
