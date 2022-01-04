@@ -1,3 +1,8 @@
+# v0.5.2
+
+* Fixed the undesirable behaviour that causes an empty response when `BySeqNum (-1)` is specified
+* Expanded `Reconnect` so that the query that caused a reconnection is visible
+
 # v0.5.1
 
 * Fixed the bug adding all the following payloads in the result of `index`

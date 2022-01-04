@@ -1,5 +1,6 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
 module Database.Franz.Client.Reconnect
@@ -35,20 +36,23 @@ fetchWithPool
   -> (STM Response -> IO r)
   -> IO r
 fetchWithPool pool q cont = withReconnection pool $ \conn -> fetch conn q cont
+  `catch` \case
+    r@(ReconnectInQuery _ _) -> throwM r -- Avoid deeply nested ReconnectInQuery
+    r -> throwM $ ReconnectInQuery q r
 
 -- | Run an action which takes a 'Connection', reconnecting whenever it throws an exception.
 withReconnection :: Pool -> (Connection -> IO a) -> IO a
 withReconnection Pool{..} cont = recovering
   poolRetryPolicy
-  [const $ Handler $ \Reconnect -> pure True]
+  [const $ Handler $ \(_ :: Reconnect) -> pure True]
   body
   where
 
     handler ex
       | Just (ClientError err) <- fromException ex = Just err
       | Just e <- fromException ex = Just (show (e :: IOException))
-      | Just Reconnect <- fromException ex = Just
-          $ "Connection to " <> fromFranzPath poolPath <> " timed out"
+      | Just (e :: Reconnect) <- fromException ex = Just
+          $ "Reconnecting to " <> fromFranzPath poolPath <> " due to " <> show e
       | otherwise = Nothing
 
     body _ = do
@@ -59,7 +63,7 @@ withReconnection Pool{..} cont = recovering
                 , fromFranzPath poolPath
                 ]
             conn <- tryJust handler (connect poolPath)
-                >>= either (\e -> poolLogFunc e >> throwM Reconnect) pure
+                >>= either (\e -> poolLogFunc e >> throwM ReconnectByError) pure
             poolLogFunc $ "Connection #" <> show i <> " established"
             pure ((i, Just conn), (i, conn))
         v@(i, Just c) -> pure (v, (i, c))
@@ -73,9 +77,12 @@ withReconnection Pool{..} cont = recovering
                 -- another thread already established a new connection
                 (j, Just _) | i == j -> (i + 1, Nothing) <$ disconnect conn
                 x -> pure x
-            throwM Reconnect
+            throwM ReconnectByError
 
-data Reconnect = Reconnect deriving (Show, Eq)
+data Reconnect = ReconnectByTimeout
+  | ReconnectByError
+  | ReconnectInQuery !Query !Reconnect
+  deriving (Show, Eq)
 instance Exception Reconnect
 
 withPool :: RetryPolicyM IO
@@ -93,4 +100,4 @@ withPool poolRetryPolicy poolLogFunc poolPath cont = do
 atomicallyReconnecting :: Int -- ^ timeout in microseconds
     -> STM a -> IO a
 atomicallyReconnecting timeout m = atomicallyWithin timeout m
-  >>= maybe (throwM Reconnect) pure
+  >>= maybe (throwM ReconnectByTimeout) pure

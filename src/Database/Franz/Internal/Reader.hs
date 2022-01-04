@@ -136,23 +136,26 @@ createStream man path = do
 type QueryResult = ((Int, Int) -- SeqNo *before* the first result, byte offset
     , (Int, Int)) -- SeqNo of the last result, byte offset
 
+isEmptyResult :: QueryResult -> Bool
+isEmptyResult ((i, _), (j, _)) = i >= j
+
 range :: Int -- ^ from
   -> Int -- ^ to
   -> RequestType
   -> IM.IntMap Int -- ^ offsets
-  -> Maybe QueryResult
-range begin end rt allOffsets = case rt of
-    AllItems -> (firstItem, maybe firstItem fst $ IM.maxViewWithKey body) <$ guard ready
+  -> (Bool, QueryResult)
+range begin end rt allOffsets = (,) ready $ case rt of
+    AllItems -> (firstItem, maybe firstItem fst $ IM.maxViewWithKey body)
     LastItem -> case IM.maxViewWithKey body of
-      Nothing -> (zero, zero) <$ guard ready
+      Nothing -> (zero, zero)
       Just (ofs', r) -> case IM.maxViewWithKey (IM.union left r) of
-        Just (ofs, _) -> (ofs, ofs') <$ guard ready
-        Nothing -> (zero, ofs') <$ guard ready
+        Just (ofs, _) -> (ofs, ofs')
+        Nothing -> (zero, ofs')
     FirstItem -> case IM.minViewWithKey body of
-      Nothing -> (zero, zero) <$ guard ready
+      Nothing -> (zero, zero)
       Just (ofs', _) -> case IM.maxViewWithKey left of
-        Just (ofs, _) -> (ofs, ofs') <$ guard ready
-        Nothing -> (zero, ofs') <$ guard ready
+        Just (ofs, _) -> (ofs, ofs')
+        Nothing -> (zero, ofs')
   where
     ------------------------------------
     --          begin     end
@@ -325,7 +328,17 @@ handleQuery prefix FranzReader{..} dir (Query name begin_ end_ rt) onError cont
           let (body, lastItem, _) = IM.splitLookup val m
           let body' = maybe id (IM.insert val) lastItem body
           return $! maybe minBound fst $ IM.maxView body'
-    return $! range begin end rt allOffsets
+    return $! case range begin end rt allOffsets of
+      (ready, result)
+        -- When BySeqNum (-1) is specified, the client expects at least one item.
+        -- More concretely, (ByIndex "time" t, BySeqNum (-1)) should resolve ByIndex
+        -- until there's an item with a timestamp later than t.
+        -- Perhaps there should be a special constructor for ItemRef that points to
+        -- the latest item at transaction, and redefine "Nth-from-end" semantics
+        -- where the "end" is frozen at the reception of the query.
+        | BySeqNum i <- end_, i < 0, isEmptyResult result -> Nothing
+        | ready -> Just result
+        | otherwise -> Nothing
   where
     acquire = join $ atomically $ do
       allStreams <- readTVar vStreams

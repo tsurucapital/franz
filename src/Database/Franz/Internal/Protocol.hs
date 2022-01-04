@@ -59,12 +59,12 @@ instance Exception FranzException
 data RequestType = AllItems
   | LastItem
   | FirstItem
-  deriving (Show, Generic)
+  deriving (Show, Eq, Generic)
 instance Serialize RequestType
 
 data ItemRef = BySeqNum !Int -- ^ sequential number
   | ByIndex !IndexName !Int -- ^ index name and value
-  deriving (Show, Generic)
+  deriving (Show, Eq, Generic)
 instance Serialize ItemRef
 
 data Query = Query
@@ -72,7 +72,7 @@ data Query = Query
   , reqFrom :: !ItemRef -- ^ name of the index to search
   , reqTo :: !ItemRef -- ^ name of the index to search
   , reqType :: !RequestType
-  } deriving (Show, Generic)
+  } deriving (Show, Eq, Generic)
 instance Serialize Query
 
 data RawRequest
