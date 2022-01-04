@@ -330,6 +330,12 @@ handleQuery prefix FranzReader{..} dir (Query name begin_ end_ rt) onError cont
           return $! maybe minBound fst $ IM.maxView body'
     return $! case range begin end rt allOffsets of
       (ready, result)
+        -- When BySeqNum (-1) is specified, the client expects at least one item.
+        -- More concretely, (ByIndex "time" t, BySeqNum (-1)) should resolve ByIndex
+        -- until there's an item with a timestamp later than t.
+        -- Perhaps there should be a special constructor for ItemRef that points to
+        -- the latest item at transaction, and redefine "Nth-from-end" semantics
+        -- where the "end" is frozen at the reception of the query.
         | BySeqNum i <- end_, i < 0, isEmptyResult result -> Nothing
         | ready -> Just result
         | otherwise -> Nothing
