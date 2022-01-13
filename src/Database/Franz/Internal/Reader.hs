@@ -312,33 +312,36 @@ handleQuery prefix FranzReader{..} dir (Query name begin_ end_ rt) onError cont
           | i < 0 = finalOffset + i
           | otherwise = i
     begin <- case begin_ of
-      BySeqNum i -> pure $ rotate i
+      BySeqNum i -> pure $ Just $ rotate i
       ByIndex index val -> case HM.lookup index indices of
         Nothing -> throwSTM $ IndexNotFound index $ HM.keys indices
         Just v -> do
           m <- readTVar v
           let (_, wing) = splitR val m
-          return $! maybe maxBound fst $ IM.minView wing
+          return $! fst <$> IM.minView wing
     end <- case end_ of
-      BySeqNum i -> pure $ rotate i
+      BySeqNum i -> pure $ Just $ rotate i
       ByIndex index val -> case HM.lookup index indices of
         Nothing -> throwSTM $ IndexNotFound index $ HM.keys indices
         Just v -> do
           m <- readTVar v
           let (body, lastItem, _) = IM.splitLookup val m
           let body' = maybe id (IM.insert val) lastItem body
-          return $! maybe minBound fst $ IM.maxView body'
-    return $! case range begin end rt allOffsets of
-      (ready, result)
-        -- When BySeqNum (-1) is specified, the client expects at least one item.
-        -- More concretely, (ByIndex "time" t, BySeqNum (-1)) should resolve ByIndex
-        -- until there's an item with a timestamp later than t.
-        -- Perhaps there should be a special constructor for ItemRef that points to
-        -- the latest item at transaction, and redefine "Nth-from-end" semantics
-        -- where the "end" is frozen at the reception of the query.
-        | BySeqNum i <- end_, i < 0, isEmptyResult result -> Nothing
-        | ready -> Just result
-        | otherwise -> Nothing
+          return $! fst <$> IM.maxView body'
+    return $! do
+      b <- begin
+      e <- end
+      case range b e rt allOffsets of
+        (ready, result)
+          -- When BySeqNum (-1) is specified, the client expects at least one item.
+          -- More concretely, (ByIndex "time" t, BySeqNum (-1)) should resolve ByIndex
+          -- until there's an item with a timestamp later than t.
+          -- Perhaps there should be a special constructor for ItemRef that points to
+          -- the latest item at transaction, and redefine "Nth-from-end" semantics
+          -- where the "end" is frozen at the reception of the query.
+          | BySeqNum i <- end_, i < 0, isEmptyResult result -> Nothing
+          | ready -> Just result
+          | otherwise -> Nothing
   where
     acquire = join $ atomically $ do
       allStreams <- readTVar vStreams
