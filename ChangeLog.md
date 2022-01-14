@@ -1,3 +1,7 @@
+# v0.5.3
+
+* It now delays a response if it fails to resolve the range specified by `ByIndex`
+
 # v0.5.2
 
 * Fixed the undesirable behaviour that causes an empty response when `BySeqNum (-1)` is specified
