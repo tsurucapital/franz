@@ -1,2 +1,7 @@
 write-ghc-environment-files: never
 packages: .
+
+source-repository-package
+    type: git
+    tag: c32bb908a29c01a7727b8d0c7f23c1d3d63849f2
+    location: git@github.com:fumieval/concurrent-resource-map
