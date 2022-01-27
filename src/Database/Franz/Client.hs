@@ -1,6 +1,7 @@
 {-# LANGUAGE LambdaCase, OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE GeneralisedNewtypeDeriving #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TypeFamilies #-}
 module Database.Franz.Client
@@ -68,7 +69,7 @@ import System.IO.Temp
 --   | ----  RawClean j ---->   |
 --   | ----  RawClean k ---->   |
 
-newtype ConnStateMap v = ConnStateMap (IM.IntMap v)
+newtype ConnStateMap v = ConnStateMap (IM.IntMap v) deriving Foldable
 
 instance ResourceMap ConnStateMap where
   type Key ConnStateMap = Int
@@ -165,6 +166,7 @@ connect (LocalFranzPath path) = do
 
 disconnect :: Connection -> IO ()
 disconnect Connection{..} = do
+  foreachResource connStates $ \mr -> forM_ mr $ \v -> atomically $ writeTVar v $ Errored $ ClientError "disconnect"
   killThread connThread
   withMVar connSocket S.close
 disconnect LocalConnection{..} =
